@@ -99,9 +99,9 @@ end
 ---@param c lreview.Comment
 function M.add_comment(c)
   storage.execute([[
-    INSERT OR REPLACE INTO comments (c_id, t_id, remote_id, author, body, created_at, in_reply_to)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  ]], c.c_id, c.t_id, c.remote_id, c.author, c.body, c.created_at, c.in_reply_to)
+    INSERT OR REPLACE INTO comments (c_id, t_id, remote_id, author, body, created_at, in_reply_to, deleted)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  ]], c.c_id, c.t_id, c.remote_id, c.author, c.body, c.created_at, c.in_reply_to, c.deleted and 1 or 0)
 end
 
 --- Get comments for a thread.
@@ -122,6 +122,12 @@ end
 ---@param c_id string
 function M.delete_comment(c_id)
   storage.execute("DELETE FROM comments WHERE c_id = ?", c_id)
+end
+
+--- Soft-delete a comment (mark deleted = 1).
+---@param c_id string
+function M.soft_delete_comment(c_id)
+  storage.execute("UPDATE comments SET deleted = 1 WHERE c_id = ?", c_id)
 end
 
 --- Get all comments for all threads in a buffer (avoids N+1 query issue).

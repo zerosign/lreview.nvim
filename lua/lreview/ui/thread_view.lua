@@ -42,7 +42,12 @@ local function format_thread(thread_id)
   for i, c in ipairs(ts) do
     local is_draft = not c.remote_id or c.remote_id == ""
     local author = c.author or "me"
-    local status = is_draft and " (Draft)" or ""
+    local status = ""
+    if is_draft then
+      status = " (Draft)"
+    elseif c.deleted == 1 then
+      status = " (Deleted)"
+    end
     local time_str = c.created_at or ""
 
     -- Format header:  author • time • status
@@ -51,7 +56,11 @@ local function format_thread(thread_id)
     add_line(string.rep("─", vim.fn.strdisplaywidth(header)), c.c_id)
 
     -- Format body (split by lines)
-    for part in c.body:gmatch("[^\r\n]+") do
+    local body = c.body
+    if c.deleted == 1 then
+      body = "[This comment has been deleted by the author]"
+    end
+    for part in body:gmatch("[^\r\n]+") do
       add_line(part, c.c_id)
     end
 

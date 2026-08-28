@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS comments (
   body        TEXT,
   created_at  TEXT,
   in_reply_to TEXT,
+  deleted     INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY(t_id) REFERENCES threads(t_id)
 );
 

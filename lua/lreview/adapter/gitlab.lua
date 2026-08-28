@@ -71,6 +71,24 @@ function M.get_mr_detail(cfg, ctx)
   argv[#argv + 1] = "-F"
   argv[#argv + 1] = "json"
   local res = base.run(argv, { cwd = ctx.cwd })
+  if not res.ok and ctx.repo then
+    local new_argv = {}
+    local skip = false
+    for _, arg in ipairs(argv) do
+      if skip then
+        skip = false
+      elseif arg == "--repo" then
+        skip = true
+      else
+        new_argv[#new_argv + 1] = arg
+      end
+    end
+    local fallback_res = base.run(new_argv, { cwd = ctx.cwd })
+    if fallback_res.ok then
+      res = fallback_res
+    end
+  end
+
   local data, err = base.parse_json(res)
   if not data then
     return nil, err

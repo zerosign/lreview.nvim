@@ -18,6 +18,12 @@ local M = {}
 ---@param repo string
 ---@return lreview.MR
 function M.gh_pr_to_mr(p, repo)
+  if p.url then
+    local parsed_repo = p.url:match("https?://[^/]+/(.-)/pull/")
+    if parsed_repo then
+      repo = parsed_repo
+    end
+  end
   return {
     mo_id = model.mo_id("github", repo, p.number),
     provider = "github",
@@ -116,6 +122,12 @@ end
 ---@param repo string
 ---@return lreview.MR
 function M.glab_mr_to_mr(m, repo)
+  if m.web_url then
+    local parsed_repo = m.web_url:match("https?://[^/]+/(.-)/.*merge_requests/")
+    if parsed_repo then
+      repo = parsed_repo
+    end
+  end
   return {
     mo_id = model.mo_id("gitlab", repo, m.iid),
     provider = "gitlab",

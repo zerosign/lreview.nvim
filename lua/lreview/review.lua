@@ -199,6 +199,8 @@ function M.sync_review()
   if not remote_threads then
     return 0, err
   end
+
+  local remote_c_ids = {}
   local n = 0
   for _, t in ipairs(remote_threads) do
     -- Upsert the thread as synced (is_draft=0). Remote threads use remote ids,
@@ -215,6 +217,7 @@ function M.sync_review()
       last_synced_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     })
     for _, c in ipairs(t.comments or {}) do
+      remote_c_ids[c.c_id] = true
       comments.add_comment({
         c_id = c.c_id,
         t_id = t.t_id,
@@ -223,10 +226,26 @@ function M.sync_review()
         body = c.body,
         created_at = c.created_at,
         in_reply_to = c.in_reply_to,
+        deleted = false,
       })
     end
     n = n + 1
   end
+
+  -- Detect and soft-delete local synced comments that were deleted on the remote
+  local existing_comments = storage.query([[
+    SELECT c.c_id, c.remote_id, c.deleted
+    FROM comments c
+    JOIN threads t ON c.t_id = t.t_id
+    WHERE t.mo_id = ? AND c.remote_id IS NOT NULL
+  ]], detail.mo_id)
+
+  for _, ec in ipairs(existing_comments or {}) do
+    if not remote_c_ids[ec.remote_id] and ec.deleted == 0 then
+      comments.soft_delete_comment(ec.c_id)
+    end
+  end
+
   return n, nil
 end
 
@@ -372,11 +391,6 @@ function M.pull_review_async(callback)
   vim.system(cmd, { cwd = current_cwd }, function(res)
     vim.schedule(function()
       local success = (res.code == 0)
-      if res.code ~= 0 or (res.stderr and res.stderr ~= "") then
-        print("Child process failed with code: " .. tostring(res.code))
-        print("Child STDOUT: " .. tostring(res.stdout))
-        print("Child STDERR: " .. tostring(res.stderr))
-      end
       if success then
         -- Refresh highlights on active buffers
         local decor = require("lreview.ui.decor")
