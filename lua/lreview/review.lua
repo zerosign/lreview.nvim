@@ -79,7 +79,7 @@ function M.start_review(cwd)
     detail = detail,
     cwd = cwd,
   }
-  M.start_auto_poll()
+  M.pull_review_async()
   return detail, nil
 end
 
@@ -339,65 +339,49 @@ function M.resolve_thread(thread_id, resolved_val)
   return true, nil
 end
 
-local poll_timer = nil
-
---- Start background auto-polling for comment updates.
-function M.start_auto_poll()
-  M.stop_auto_poll()
-  local sync_cfg = config.get_defaults().sync or {}
-  if not sync_cfg.auto_poll then
-    return
+--- Fetch remote reviews asynchronously (non-blocking).
+--- Executes the sync_review script in a headless Neovim background job.
+---@param callback fun(success: boolean)|nil
+---@return boolean, string|nil
+function M.pull_review_async(callback)
+  if not M.current then
+    if callback then callback(false) end
+    return false, "no active review"
   end
-  -- Convert minutes to milliseconds (default to 5 mins)
-  local interval_ms = (sync_cfg.interval_mins or 5) * 60 * 1000
 
-  poll_timer = vim.loop.new_timer()
-  poll_timer:start(interval_ms, interval_ms, vim.schedule_wrap(function()
-    if not M.current then
-      M.stop_auto_poll()
-      return
-    end
+  local current_cwd = M.current.cwd
+  local cmd = {
+    vim.v.progpath,
+    "--headless",
+    "-c",
+    "lua require('lreview').api.sync_review()",
+    "-c",
+    "qa"
+  }
 
-    local current_cwd = M.current.cwd
-    local cmd = {
-      vim.v.progpath,
-      "--headless",
-      "-c",
-      "lua require('lreview').api.sync_review()",
-      "-c",
-      "qa"
-    }
-
-    vim.system(cmd, { cwd = current_cwd }, function(res)
-      vim.schedule(function()
-        if res.code == 0 then
-          -- Refresh highlights on active buffers
-          local decor = require("lreview.ui.decor")
-          for bufnr, _ in pairs(decor.enabled_buffers) do
-            if vim.api.nvim_buf_is_valid(bufnr) then
-              decor.refresh(bufnr)
-            end
-          end
-          -- Refresh thread view if it is open
-          local tv = require("lreview.ui.thread_view")
-          if tv.state and vim.api.nvim_buf_is_valid(tv.state.bufnr) then
-            tv.redraw()
+  vim.system(cmd, { cwd = current_cwd }, function(res)
+    vim.schedule(function()
+      local success = (res.code == 0)
+      if success then
+        -- Refresh highlights on active buffers
+        local decor = require("lreview.ui.decor")
+        for bufnr, _ in pairs(decor.enabled_buffers) do
+          if vim.api.nvim_buf_is_valid(bufnr) then
+            decor.refresh(bufnr)
           end
         end
-      end)
+        -- Refresh thread view if it is open
+        local tv = require("lreview.ui.thread_view")
+        if tv.state and vim.api.nvim_buf_is_valid(tv.state.bufnr) then
+          tv.redraw()
+        end
+      end
+      if callback then
+        callback(success)
+      end
     end)
-  end))
-end
-
---- Stop background auto-polling.
-function M.stop_auto_poll()
-  if poll_timer then
-    pcall(function()
-      poll_timer:stop()
-      poll_timer:close()
-    end)
-    poll_timer = nil
-  end
+  end)
+  return true, nil
 end
 
 return M

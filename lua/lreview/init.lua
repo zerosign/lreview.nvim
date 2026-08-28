@@ -190,14 +190,16 @@ function M.register_commands()
     vim.notify(string.format("lreview: submitted %d inline comment(s)", pushed), vim.log.levels.INFO)
   end, {})
 
-  -- LocalReviewPull: fetch remote MR threads/comments into local storage.
+  -- LocalReviewPull: fetch remote MR threads/comments into local storage (non-blocking).
   api.nvim_create_user_command("LocalReviewPull", function()
-    local synced, err = review.sync_review()
-    if err then
-      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-      return
-    end
-    vim.notify(string.format("lreview: pulled %d remote thread(s)", synced), vim.log.levels.INFO)
+    vim.notify("lreview: pulling remote updates...", vim.log.levels.INFO)
+    review.pull_review_async(function(success)
+      if success then
+        vim.notify("lreview: remote updates pulled successfully", vim.log.levels.INFO)
+      else
+        vim.notify("lreview: failed to pull remote updates", vim.log.levels.ERROR)
+      end
+    end)
   end, {})
 
   -- LocalReviewClose [number]: close the MR on the platform.
@@ -263,6 +265,7 @@ M.api = {
   add_comment = review.add_comment,
   submit_review = review.submit_review,
   sync_review = review.sync_review,
+  pull_review_async = review.pull_review_async,
   close_review = review.close_review,
   approve_review = review.approve_review,
   resolve_thread = review.resolve_thread,
