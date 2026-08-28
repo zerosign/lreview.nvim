@@ -108,6 +108,12 @@ for i = 1, 1000 do
   end)
   record("READ", "comments_for_thread (index scan)", ms_read_ct)
 
+  -- 4.5 READ: Comments for Buffer (Optimized single JOIN query)
+  local ms_read_buf = profile("comments_for_buffer", function()
+    comments.comments_for_buffer("bench:repo:1", "src/main.lua")
+  end)
+  record("READ", "comments_for_buffer (single JOIN)", ms_read_buf)
+
   -- 5. UPDATE: Update Comment
   local ms_update_c = profile("update_comment", function()
     comments.update_comment(c_id, "Updated body text " .. i)
