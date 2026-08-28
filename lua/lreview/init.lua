@@ -242,6 +242,11 @@ function M.register_commands()
     end
     require("lreview.ui.thread_view").show(vim.api.nvim_get_current_buf(), path, line)
   end, {})
+
+  -- LocalReviewList: list all MR comments in a quickfix buffer.
+  api.nvim_create_user_command("LocalReviewList", function()
+    require("lreview.ui.list").open_quickfix()
+  end, {})
 end
 
 --- Public API surface.
@@ -253,6 +258,7 @@ M.api = {
   decor = require("lreview.ui.decor"),
   thread_view = require("lreview.ui.thread_view"),
   editor = require("lreview.ui.editor"),
+  list = require("lreview.ui.list"),
   start_review = review.start_review,
   add_comment = review.add_comment,
   submit_review = review.submit_review,
