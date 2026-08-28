@@ -123,7 +123,7 @@ end
 ---@return lreview.MR
 function M.glab_mr_to_mr(m, repo)
   if m.web_url then
-    local parsed_repo = m.web_url:match("https?://[^/]+/(.-)/.*merge_requests/")
+    local parsed_repo = m.web_url:match("https?://[^/]+/(.-)/%-/merge_requests/") or m.web_url:match("https?://[^/]+/(.-)/merge_requests/")
     if parsed_repo then
       repo = parsed_repo
     end

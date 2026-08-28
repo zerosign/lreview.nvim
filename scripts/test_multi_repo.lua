@@ -1,4 +1,4 @@
--- Test script to verify multi-repository co-existence in SQLite.
+-- Test script to verify multi-repository co-existence in SQLite (GitLab).
 -- This script runs pulls against two different repositories and verifies
 -- that comments from both are populated side-by-side in the same database.
 
@@ -11,10 +11,10 @@ require("lreview").setup({
   defaults = {
     db_path = vim.fn.stdpath("data") .. "/lreview/lreview.db",
   },
-  ["github\\.com"] = {
-    adapter = "github",
-    provider = "gh",
-    host = "github.com",
+  ["gitlab\\.com|gitlab\\..*"] = {
+    adapter = "gitlab",
+    provider = "glab",
+    host = "gitlab.com",
   },
 })
 
@@ -42,10 +42,10 @@ local function run_async_wait()
 end
 
 -- ============================================================================
--- 1. Sync First Repository (github-sample-review)
+-- 1. Sync First Repository (gitlab-sample-review)
 -- ============================================================================
 print("TEST: Starting review on first repository...")
-local detail1, err1 = review.start_review("tmp/github-sample-review")
+local detail1, err1 = review.start_review("tmp/gitlab-sample-review")
 if not detail1 then
   print("FAIL: Could not start review 1:", err1)
   os.exit(1)
@@ -55,12 +55,11 @@ local threads1 = comments.threads_for_mr(detail1.mo_id)
 print(string.format("Repo 1 (%s) has %d threads in SQLite.", detail1.mo_id, #threads1))
 
 -- ============================================================================
--- 2. Sync Second Repository (github-sample-review2 or custom path)
+-- 2. Sync Second Repository (gitlab-sample-review2)
 -- ============================================================================
-local repo2_path = "tmp/github-sample-review2"
+local repo2_path = "tmp/gitlab-sample-review2"
 if vim.fn.isdirectory(repo2_path) == 0 then
   print("\nINFO: " .. repo2_path .. " not found. Skipping second repo test.")
-  print("To run: clone a secondary repo or private fork to tmp/github-sample-review2 and re-run.")
   os.exit(0)
 end
 
@@ -88,5 +87,5 @@ if #all_threads < 2 then
   os.exit(1)
 end
 
-print("\nSUCCESS: Multiple repositories co-exist successfully in SQLite.")
+print("\nSUCCESS: Multiple GitLab repositories co-exist successfully in SQLite.")
 os.exit(0)
