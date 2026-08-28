@@ -1,0 +1,185 @@
+---@meta
+
+-- Git helpers: repo detection, remote URL parsing, current branch/sha.
+
+local M = {}
+
+--- Run a git command in the given directory (or cwd).
+---@param args string[]
+---@param cwd string|nil
+---@return string|nil output, string|nil err
+local function git(args, cwd)
+  local cmd = { "git" }
+  for _, a in ipairs(args) do
+    cmd[#cmd + 1] = a
+  end
+  -- Use vim.system with the cwd option: vim.fn.system(cmd, cwd) does not
+  -- reliably honor a cwd different from the process cwd in this Neovim build.
+  local opts = { text = true }
+  if cwd then
+    opts.cwd = cwd
+  end
+  local res = vim.system(cmd, opts):wait()
+  if res.code ~= 0 then
+    return nil, res.stdout .. res.stderr
+  end
+  return res.stdout, nil
+end
+
+--- Find the git root of a directory (or nil if not a repo).
+---@param cwd string|nil
+---@return string|nil
+function M.root(cwd)
+  local out, err = git({ "rev-parse", "--show-toplevel" }, cwd)
+  if not out then
+    return nil
+  end
+  return vim.trim(out)
+end
+
+--- Get the current branch name.
+---@param cwd string|nil
+---@return string|nil
+function M.current_branch(cwd)
+  local out, err = git({ "branch", "--show-current" }, cwd)
+  if not out then
+    return nil
+  end
+  local b = vim.trim(out)
+  if b == "" then
+    return nil
+  end
+  return b
+end
+
+--- Get the current HEAD sha.
+---@param cwd string|nil
+---@return string|nil
+function M.head_sha(cwd)
+  local out, err = git({ "rev-parse", "HEAD" }, cwd)
+  if not out then
+    return nil
+  end
+  return vim.trim(out)
+end
+
+--- Parse a git remote URL into { domain, repo } or nil.
+--- Handles https://, git@host:path, ssh://git@host/path, git://.
+---@param url string
+---@return table|nil  -- { domain, repo }
+function M.parse_remote_url(url)
+  url = vim.trim(url)
+  if url == "" then
+    return nil
+  end
+  -- strip trailing .git
+  url = url:gsub("%.git$", "")
+
+  local domain, path
+  -- ssh://git@host:port/path or https://host/path
+  local scheme = url:match("^([a-zA-Z][a-zA-Z0-9+.-]*)://")
+  if scheme then
+    local rest = url:sub(#scheme + 4)
+    -- strip userinfo
+    rest = rest:gsub("^[^@]*@", "")
+    -- strip port
+    rest = rest:gsub("^([^:/]+):%d+", "%1")
+    domain, path = rest:match("^([^/]+)/(.+)$")
+  else
+    -- scp-like: git@host:owner/repo
+    local rest = url:gsub("^[^@]*@", "")
+    domain, path = rest:match("^([^:]+):(.+)$")
+  end
+
+  if not domain or not path then
+    return nil
+  end
+  return { domain = domain, repo = path }
+end
+
+--- Get the remotes of a repo as a list of { name, url, domain, repo }.
+---@param cwd string|nil
+---@return table[]
+function M.remotes(cwd)
+  local out, err = git({ "remote", "-v" }, cwd)
+  if not out then
+    return {}
+  end
+  local result = {}
+  for line in out:gmatch("[^\n]+") do
+    local name, url = line:match("^(%S+)%s+(%S+)")
+    if name and url then
+      local parsed = M.parse_remote_url(url)
+      if parsed then
+        result[#result + 1] = {
+          name = name,
+          url = url,
+          domain = parsed.domain,
+          repo = parsed.repo,
+        }
+      end
+    end
+  end
+  return result
+end
+
+--- Get the primary remote (origin preferred, else first).
+---@param cwd string|nil
+---@return table|nil
+function M.primary_remote(cwd)
+  local remotes = M.remotes(cwd)
+  for _, r in ipairs(remotes) do
+    if r.name == "origin" then
+      return r
+    end
+  end
+  return remotes[1]
+end
+
+--- List remote branch names (e.g. from origin), excluding the current branch.
+--- Used to offer target branches for stacked MR/PR creation.
+---@param cwd string|nil
+---@return string[]
+function M.remote_branches(cwd)
+  local out, err = git({ "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin" }, cwd)
+  if not out then
+    return {}
+  end
+  local current = M.current_branch(cwd)
+  local result = {}
+  for line in out:gmatch("[^\n]+") do
+    local b = vim.trim(line)
+    -- strip the "origin/" prefix
+    b = b:gsub("^origin/", "")
+    -- "origin" alone is the origin/HEAD symref; skip it along with HEAD.
+    if b ~= "" and b ~= current and b ~= "HEAD" and b ~= "origin" then
+      result[#result + 1] = b
+    end
+  end
+  return result
+end
+
+--- Determine the repo's default branch (from origin/HEAD, else main/master).
+---@param cwd string|nil
+---@return string|nil
+function M.default_branch(cwd)
+  local out, err = git({ "symbolic-ref", "--short", "refs/remotes/origin/HEAD" }, cwd)
+  if out then
+    local b = vim.trim(out):gsub("^origin/", "")
+    if b ~= "" and b ~= "HEAD" then
+      return b
+    end
+  end
+  -- Fall back to a known default.
+  local branches = M.remote_branches(cwd)
+  for _, b in ipairs({ "main", "master" }) do
+    for _, rb in ipairs(branches) do
+      if rb == b then
+        return b
+      end
+    end
+  end
+  return nil
+end
+
+return M
