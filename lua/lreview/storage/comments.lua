@@ -124,4 +124,18 @@ function M.delete_comment(c_id)
   storage.execute("DELETE FROM comments WHERE c_id = ?", c_id)
 end
 
+--- Get all comments for all threads in a buffer (avoids N+1 query issue).
+---@param mo_id string
+---@param path string
+---@return table[]
+function M.comments_for_buffer(mo_id, path)
+  return storage.query([[
+    SELECT c.*, t.resolved, t.is_draft as thread_is_draft, t.start_line, t.end_line
+    FROM comments c
+    JOIN threads t ON c.t_id = t.t_id
+    WHERE t.mo_id = ? AND t.path = ?
+    ORDER BY t.start_line, c.created_at
+  ]], mo_id, path)
+end
+
 return M

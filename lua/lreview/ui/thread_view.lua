@@ -192,11 +192,24 @@ function M.show(bufnr, rel_path, line)
 
   M.close()
 
-  -- Create the read-only markdown buffer
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[buf].filetype = "markdown"
-  vim.bo[buf].buftype = "nofile"
-  vim.bo[buf].bufhidden = "wipe"
+  -- Reuse or create the read-only markdown buffer
+  local buf = M.buf
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+    buf = vim.api.nvim_create_buf(false, true)
+    vim.bo[buf].filetype = "markdown"
+    vim.bo[buf].buftype = "nofile"
+    vim.bo[buf].bufhidden = "hide"
+    M.buf = buf
+
+    -- Apply buffer-local mappings once
+    local opts = { silent = true, noremap = true, buffer = buf }
+    vim.keymap.set("n", "q", function() M.close() end, opts)
+    vim.keymap.set("n", "<esc>", function() M.close() end, opts)
+    vim.keymap.set("n", "r", function() handle_action("reply") end, opts)
+    vim.keymap.set("n", "e", function() handle_action("edit") end, opts)
+    vim.keymap.set("n", "d", function() handle_action("delete") end, opts)
+    vim.keymap.set("n", "s", function() handle_action("resolve") end, opts)
+  end
 
   -- Save initial state
   M.state = {
@@ -209,15 +222,6 @@ function M.show(bufnr, rel_path, line)
   }
 
   M.redraw()
-
-  -- Apply window mappings
-  local opts = { silent = true, noremap = true, buffer = buf }
-  vim.keymap.set("n", "q", function() M.close() end, opts)
-  vim.keymap.set("n", "<esc>", function() M.close() end, opts)
-  vim.keymap.set("n", "r", function() handle_action("reply") end, opts)
-  vim.keymap.set("n", "e", function() handle_action("edit") end, opts)
-  vim.keymap.set("n", "d", function() handle_action("delete") end, opts)
-  vim.keymap.set("n", "s", function() handle_action("resolve") end, opts)
 
   -- Retrieve layout configuration
   local ui_cfg = config.get_defaults().ui or {}

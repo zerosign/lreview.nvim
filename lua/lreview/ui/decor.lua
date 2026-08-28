@@ -63,40 +63,57 @@ function M.refresh(bufnr)
     return
   end
 
-  local threads = comments.threads_for_buffer(mo_id, rel_path)
-  for _, t in ipairs(threads) do
-    local cs = comments.comments_for_thread(t.t_id)
-    if #cs > 0 then
-      local is_draft = (t.is_draft == 1)
-      local is_resolved = (t.resolved == 1)
-      local sign_hl = is_resolved and "Comment" or (is_draft and "LReviewSignDraft" or "LReviewSignSynced")
-      local text_hl = is_resolved and "Comment" or (is_draft and "LReviewVirtTextDraft" or "LReviewVirtTextSynced")
-      local sign_text = is_resolved and "✔" or (is_draft and "💬" or "●")
+  local all_comments = comments.comments_for_buffer(mo_id, rel_path)
 
-      local draft_count = 0
-      for _, c in ipairs(cs) do
-        if not c.remote_id or c.remote_id == "" then
-          draft_count = draft_count + 1
-        end
-      end
-
-      local virt_text_str = string.format("   %d comment(s)", #cs)
-      if draft_count > 0 then
-        virt_text_str = virt_text_str .. string.format(" (%d draft)", draft_count)
-      end
-      if is_resolved then
-        virt_text_str = virt_text_str .. " (Resolved)"
-      end
-
-      -- Extmarks are 0-indexed for lines.
-      local line_idx = t.start_line - 1
-      pcall(vim.api.nvim_buf_set_extmark, bufnr, ns, line_idx, 0, {
-        sign_text = sign_text,
-        sign_hl_group = sign_hl,
-        virt_text = { { virt_text_str, text_hl } },
-        virt_text_pos = "eol",
-      })
+  -- Group comments by thread t_id while preserving order
+  local threads = {}
+  local thread_order = {}
+  for _, c in ipairs(all_comments) do
+    if not threads[c.t_id] then
+      threads[c.t_id] = {
+        t_id = c.t_id,
+        start_line = c.start_line,
+        resolved = c.resolved,
+        is_draft = c.thread_is_draft,
+        comments = {}
+      }
+      thread_order[#thread_order + 1] = c.t_id
     end
+    table.insert(threads[c.t_id].comments, c)
+  end
+
+  for _, t_id in ipairs(thread_order) do
+    local t = threads[t_id]
+    local cs = t.comments
+    local is_draft = (t.is_draft == 1)
+    local is_resolved = (t.resolved == 1)
+    local sign_hl = is_resolved and "Comment" or (is_draft and "LReviewSignDraft" or "LReviewSignSynced")
+    local text_hl = is_resolved and "Comment" or (is_draft and "LReviewVirtTextDraft" or "LReviewVirtTextSynced")
+    local sign_text = is_resolved and "✔" or (is_draft and "💬" or "●")
+
+    local draft_count = 0
+    for _, c in ipairs(cs) do
+      if not c.remote_id or c.remote_id == "" then
+        draft_count = draft_count + 1
+      end
+    end
+
+    local virt_text_str = string.format("   %d comment(s)", #cs)
+    if draft_count > 0 then
+      virt_text_str = virt_text_str .. string.format(" (%d draft)", draft_count)
+    end
+    if is_resolved then
+      virt_text_str = virt_text_str .. " (Resolved)"
+    end
+
+    -- Extmarks are 0-indexed for lines.
+    local line_idx = t.start_line - 1
+    pcall(vim.api.nvim_buf_set_extmark, bufnr, ns, line_idx, 0, {
+      sign_text = sign_text,
+      sign_hl_group = sign_hl,
+      virt_text = { { virt_text_str, text_hl } },
+      virt_text_pos = "eol",
+    })
   end
 end
 
@@ -107,13 +124,39 @@ M.enabled_buffers = {}
 ---@param bufnr integer|nil
 function M.toggle(bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf()
+  local grp_name = "lreview_hover_" .. bufnr
   if M.enabled_buffers[bufnr] then
     M.clear(bufnr)
+    pcall(vim.api.nvim_del_augroup_by_name, grp_name)
     M.enabled_buffers[bufnr] = nil
     vim.notify("lreview: review highlights disabled", vim.log.levels.INFO)
   else
     M.enabled_buffers[bufnr] = true
     M.refresh(bufnr)
+
+    -- Auto-hover when cursor pauses on a line with review comments
+    vim.api.nvim_create_autocmd("CursorHold", {
+      buffer = bufnr,
+      callback = function()
+        local line = vim.api.nvim_win_get_cursor(0)[1]
+        local abs = vim.api.nvim_buf_get_name(0)
+        local root = git.root(vim.fn.getcwd())
+        local path = abs
+        if root and vim.startswith(abs, root .. "/") then
+          path = abs:sub(#root + 2)
+        end
+        if review.current then
+          local threads = comments.threads_for_buffer(review.current.detail.mo_id, path, line)
+          if #threads > 0 then
+            require("lreview.ui.thread_view").show(bufnr, path, line)
+          else
+            require("lreview.ui.thread_view").close()
+          end
+        end
+      end,
+      group = vim.api.nvim_create_augroup(grp_name, { clear = true }),
+    })
+
     vim.notify("lreview: review highlights enabled", vim.log.levels.INFO)
   end
 end
