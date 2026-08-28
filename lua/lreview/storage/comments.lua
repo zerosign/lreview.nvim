@@ -7,6 +7,7 @@
 -- idx_threads_buffer (mo_id, path, start_line, end_line).
 
 local storage = require("lreview.storage")
+local unpack = table.unpack or unpack
 
 local M = {}
 
@@ -50,7 +51,7 @@ function M.threads_for_buffer(mo_id, path, line)
     params[#params + 1] = line
   end
   sql = sql .. " ORDER BY start_line"
-  return storage.query(sql, table.unpack(params))
+  return storage.query(sql, unpack(params))
 end
 
 --- List all threads for an MR.

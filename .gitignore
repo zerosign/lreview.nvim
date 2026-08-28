@@ -66,3 +66,12 @@ luac.out
 
 # Local test clones of sample repos (discovery/testing only)
 tmp/
+
+# Sandbox runtime state and caches
+sandbox/cache/
+sandbox/state/
+sandbox/data/
+*.db
+*.luac
+*.log
+session-ses_*.md

@@ -163,39 +163,21 @@ function M.register_commands()
 
   -- LocalReviewComment: add a draft comment on the visual selection.
   api.nvim_create_user_command("LocalReviewComment", function()
-    -- The '< and '> marks are set by the visual selection even though the
-    -- command callback runs after visual mode has been exited (pressing ':'
-    -- leaves visual mode). Check the marks, not vim.fn.mode().
     local start_line = vim.fn.line("'<")
     local end_line = vim.fn.line("'>")
     if start_line == 0 or end_line == 0 then
       vim.notify("lreview: LocalReviewComment requires a visual selection", vim.log.levels.WARN)
       return
     end
-    -- Store the repo-relative path (platforms resolve inline comments against
-    -- the diff by repo-relative path, not absolute path).
     local abs = vim.fn.expand("%:p")
     local root = git.root(vim.fn.getcwd())
     local path = abs
     if root then
-      local rel = vim.fn.fnamemodify(abs, ":~:.")
-      -- fnamemodify with ':.' makes it relative to cwd; we want relative to
-      -- the git root, so strip the cwd prefix if the root differs.
       if vim.startswith(abs, root .. "/") then
         path = abs:sub(#root + 2)
       end
     end
-    -- TODO: prompt for body (UI layer).
-    local body = vim.fn.input("Comment: ")
-    if body == "" then
-      return
-    end
-    local thread, err = review.add_comment(path, start_line, end_line, body)
-    if not thread then
-      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-      return
-    end
-    vim.notify("lreview: draft comment added", vim.log.levels.INFO)
+    require("lreview.ui.editor").open_new_comment(path, start_line, end_line)
   end, { range = true })
 
   -- LocalReviewSubmit: push all draft inline comments (no review-state change).
@@ -241,6 +223,25 @@ function M.register_commands()
     end
     vim.notify(string.format("lreview: approved MR #%d", number or (review.current and review.current.detail.number)), vim.log.levels.INFO)
   end, { nargs = "?" })
+
+  -- LocalReviewToggle: toggle review highlights in the current buffer.
+  api.nvim_create_user_command("LocalReviewToggle", function()
+    require("lreview.ui.decor").toggle()
+  end, {})
+
+  -- LocalReviewHover: show hover/split thread window for the current line.
+  api.nvim_create_user_command("LocalReviewHover", function()
+    local line = vim.api.nvim_win_get_cursor(0)[1]
+    local abs = vim.fn.expand("%:p")
+    local root = git.root(vim.fn.getcwd())
+    local path = abs
+    if root then
+      if vim.startswith(abs, root .. "/") then
+        path = abs:sub(#root + 2)
+      end
+    end
+    require("lreview.ui.thread_view").show(vim.api.nvim_get_current_buf(), path, line)
+  end, {})
 end
 
 --- Public API surface.
@@ -249,6 +250,9 @@ M.api = {
   review = review,
   adapter = adapter,
   storage = storage,
+  decor = require("lreview.ui.decor"),
+  thread_view = require("lreview.ui.thread_view"),
+  editor = require("lreview.ui.editor"),
   start_review = review.start_review,
   add_comment = review.add_comment,
   submit_review = review.submit_review,
