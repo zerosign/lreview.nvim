@@ -260,4 +260,25 @@ function M.create_mr(cfg, ctx, opts)
   return url, nil
 end
 
+--- Resolve or unresolve a comment thread on GitLab.
+---@param cfg table
+---@param ctx table
+---@param mr_number integer  -- iid
+---@param thread_id string  -- discussion_id
+---@param resolved boolean
+---@return boolean, string|nil
+function M.resolve_thread(cfg, ctx, mr_number, thread_id, resolved)
+  local argv = base_argv(cfg, ctx)
+  argv[#argv + 1] = "mr"
+  argv[#argv + 1] = "note"
+  argv[#argv + 1] = resolved and "resolve" or "reopen"
+  argv[#argv + 1] = tostring(mr_number)
+  argv[#argv + 1] = thread_id
+  local res = base.run(argv, { cwd = ctx.cwd })
+  if not res.ok then
+    return false, res.error
+  end
+  return true, nil
+end
+
 return M

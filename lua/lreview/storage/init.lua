@@ -71,13 +71,33 @@ function M.current_version()
   return v
 end
 
---- Run pending migrations.
----@return boolean, string|nil
 function M.migrate()
   if not M.db then
     return false, "db not open"
   end
   local cur = M.current_version()
+  if cur == 0 then
+    -- Load base schema from schema.sql located in the same directory.
+    local source = debug.getinfo(1).source:match("@(.*)$")
+    if source then
+      local sql_file = vim.fn.fnamemodify(source, ":h") .. "/schema.sql"
+      local f = io.open(sql_file, "r")
+      if f then
+        local sql = f:read("*a")
+        f:close()
+        local ok, err = M.db:exec(sql)
+        if ok ~= 0 then
+          return false, "failed to initialize base schema: " .. tostring(err)
+        end
+        cur = 3 -- base schema sets it to version 3
+      else
+        return false, "could not find schema.sql at " .. sql_file
+      end
+    else
+      return false, "could not determine source path for schema.sql"
+    end
+  end
+
   for v = cur + 1, schema.version do
     local sql = schema.migrations[v]
     if sql then

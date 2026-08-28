@@ -259,6 +259,7 @@ M.api = {
   sync_review = review.sync_review,
   close_review = review.close_review,
   approve_review = review.approve_review,
+  resolve_thread = review.resolve_thread,
   resolve = adapter.resolve,
 }
 

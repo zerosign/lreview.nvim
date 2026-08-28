@@ -21,11 +21,11 @@ local M = {}
 function M.create_thread(t)
   storage.execute([[
     INSERT OR REPLACE INTO threads
-      (t_id, mo_id, path, commit_sha, start_line, end_line, is_draft, last_synced_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      (t_id, mo_id, path, commit_sha, start_line, end_line, is_draft, last_synced_at, resolved)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   ]],
     t.t_id, t.mo_id, t.path, t.commit_sha, t.start_line, t.end_line,
-    t.is_draft and 1 or 0, t.last_synced_at)
+    t.is_draft and 1 or 0, t.last_synced_at, t.resolved and 1 or 0)
   return t.t_id
 end
 
@@ -82,6 +82,13 @@ end
 function M.delete_thread(t_id)
   storage.execute("DELETE FROM comments WHERE t_id = ?", t_id)
   storage.execute("DELETE FROM threads WHERE t_id = ?", t_id)
+end
+
+--- Resolve or unresolve a thread.
+---@param t_id string
+---@param resolved_val boolean
+function M.resolve_thread(t_id, resolved_val)
+  storage.execute("UPDATE threads SET resolved = ? WHERE t_id = ?", resolved_val and 1 or 0, t_id)
 end
 
 -- ---------------------------------------------------------------------------

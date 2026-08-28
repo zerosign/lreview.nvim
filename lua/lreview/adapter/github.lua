@@ -181,51 +181,96 @@ function M.fetch_inline_comments(cfg, ctx, number)
   return out, nil
 end
 
---- Fetch remote inline comments grouped into threads for an MR.
---- GitHub's inline comments are a flat list; replies reference a root comment
---- via `in_reply_to_id`. We group each root comment (and its replies) into a
---- thread keyed by the root comment id.
----@param cfg table
----@param ctx table
----@param number integer
----@param mo_id string
----@return lreview.Thread[]|nil, string|nil
 function M.fetch_threads(cfg, ctx, number, mo_id)
-  local comments, err = M.fetch_inline_comments(cfg, ctx, number)
-  if not comments then
+  local owner, repo_name = ctx.repo:match("^([^/]+)/(.+)$")
+  if not owner or not repo_name then
+    return nil, "invalid repository path: " .. tostring(ctx.repo)
+  end
+
+  local argv = api_argv(cfg, ctx)
+  argv[#argv + 1] = "graphql"
+  argv[#argv + 1] = "-F"
+  argv[#argv + 1] = "owner=" .. owner
+  argv[#argv + 1] = "-F"
+  argv[#argv + 1] = "name=" .. repo_name
+  argv[#argv + 1] = "-F"
+  argv[#argv + 1] = "number=" .. number
+
+  local query = [[
+    query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: $number) {
+          reviewThreads(first: 100) {
+            nodes {
+              id
+              isResolved
+              path
+              line
+              comments(first: 100) {
+                nodes {
+                  id
+                  body
+                  createdAt
+                  author {
+                    login
+                  }
+                  commit {
+                    oid
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]]
+  argv[#argv + 1] = "-f"
+  argv[#argv + 1] = "query=" .. query
+
+  local res = base.run(argv, { cwd = ctx.cwd })
+  local data, err = base.parse_json(res)
+  if not data then
     return nil, err
   end
-  -- Index comments by id, and collect roots (no in_reply_to).
-  local by_id = {}
-  local roots = {}
-  for _, c in ipairs(comments) do
-    by_id[c.c_id] = c
-    if not c.in_reply_to then
-      roots[#roots + 1] = c
-    end
+
+  local pr = data.data and data.data.repository and data.data.repository.pullRequest
+  if not pr then
+    return {}, nil
   end
+
   local threads = {}
-  for _, root in ipairs(roots) do
-    local t = {
-      t_id = root.c_id, -- use the root comment id as the thread id
-      mo_id = mo_id,
-      path = root.path,
-      commit_sha = root.commit_sha,
-      start_line = root.line,
-      end_line = root.line,
-      is_draft = false,
-      last_synced_at = nil,
-      comments = {},
-    }
-    -- Root comment first, then any replies referencing it.
-    t.comments[#t.comments + 1] = root
-    for _, c in ipairs(comments) do
-      if c.in_reply_to == root.c_id then
-        t.comments[#t.comments + 1] = c
+  local nodes = pr.reviewThreads and pr.reviewThreads.nodes or {}
+  for _, node in ipairs(nodes) do
+    local comments_nodes = node.comments and node.comments.nodes or {}
+    if #comments_nodes > 0 then
+      local t = {
+        t_id = node.id,
+        mo_id = mo_id,
+        path = node.path,
+        commit_sha = comments_nodes[1].commit and comments_nodes[1].commit.oid or nil,
+        start_line = node.line,
+        end_line = node.line,
+        is_draft = false,
+        resolved = node.isResolved and 1 or 0,
+        last_synced_at = nil,
+        comments = {},
+      }
+      for _, c_node in ipairs(comments_nodes) do
+        t.comments[#t.comments + 1] = {
+          c_id = c_node.id,
+          t_id = node.id,
+          remote_id = c_node.id,
+          author = c_node.author and c_node.author.login or "ghost",
+          body = c_node.body,
+          created_at = c_node.createdAt,
+          in_reply_to = nil,
+        }
       end
+      threads[#threads + 1] = t
     end
-    threads[#threads + 1] = t
   end
+
   return threads, nil
 end
 
@@ -380,6 +425,35 @@ function M.create_mr(cfg, ctx, opts)
   -- gh pr create prints the PR URL on success.
   local url = res.stdout:match("https?://%S+")
   return url, nil
+end
+
+--- Resolve or unresolve a comment thread on GitHub.
+---@param cfg table
+---@param ctx table
+---@param mr_number integer
+---@param thread_id string
+---@param resolved boolean
+---@return boolean, string|nil
+function M.resolve_thread(cfg, ctx, mr_number, thread_id, resolved)
+  local argv = api_argv(cfg, ctx)
+  argv[#argv + 1] = "graphql"
+  local mutation = resolved and "resolveReviewThread" or "unresolveReviewThread"
+  local query = string.format([[
+    mutation($id: ID!) {
+      %s(input: {threadId: $id}) {
+        thread { isResolved }
+      }
+    }
+  ]], mutation)
+  argv[#argv + 1] = "-f"
+  argv[#argv + 1] = "query=" .. query
+  argv[#argv + 1] = "-F"
+  argv[#argv + 1] = "id=" .. thread_id
+  local res = base.run(argv, { cwd = ctx.cwd })
+  if not res.ok then
+    return false, res.error
+  end
+  return true, nil
 end
 
 return M

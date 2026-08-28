@@ -25,11 +25,18 @@ local function format_thread(thread_id)
   local lines = {}
   local line_map = {}
 
+  local t = comments.get_thread(thread_id)
   local function add_line(text, c_id)
     lines[#lines + 1] = text
     if c_id then
       line_map[#lines] = c_id
     end
+  end
+
+  if t and t.resolved == 1 then
+    add_line("✔ RESOLVED THREAD")
+    add_line("=================")
+    add_line("")
   end
 
   for i, c in ipairs(ts) do
@@ -58,6 +65,8 @@ local function format_thread(thread_id)
   add_line("")
   add_line("───────────────────────────────────────────────────────────")
   add_line(" [r] Reply  |  [e] Edit Draft  |  [d] Delete Draft  |  [q] Close")
+  local toggle_resolve_help = (t and t.resolved == 1) and " [s] Reopen Thread" or " [s] Resolve Thread"
+  add_line(toggle_resolve_help)
 
   return lines, line_map
 end
@@ -138,6 +147,22 @@ local function handle_action(action)
     if bufnr ~= -1 then
       require("lreview.ui.decor").refresh(bufnr)
     end
+  elseif action == "resolve" then
+    local t = comments.get_thread(M.state.thread_id)
+    if t then
+      local new_val = (t.resolved ~= 1)
+      local ok, err = review.resolve_thread(M.state.thread_id, new_val)
+      if not ok then
+        vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+        return
+      end
+      M.redraw()
+      vim.notify(new_val and "lreview: thread resolved" or "lreview: thread reopened", vim.log.levels.INFO)
+      local bufnr = vim.fn.bufnr(M.state.path)
+      if bufnr ~= -1 then
+        require("lreview.ui.decor").refresh(bufnr)
+      end
+    end
   end
 end
 
@@ -192,6 +217,7 @@ function M.show(bufnr, rel_path, line)
   vim.keymap.set("n", "r", function() handle_action("reply") end, opts)
   vim.keymap.set("n", "e", function() handle_action("edit") end, opts)
   vim.keymap.set("n", "d", function() handle_action("delete") end, opts)
+  vim.keymap.set("n", "s", function() handle_action("resolve") end, opts)
 
   -- Retrieve layout configuration
   local ui_cfg = config.get_defaults().ui or {}

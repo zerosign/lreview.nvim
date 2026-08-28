@@ -205,6 +205,7 @@ function M.sync_review()
       start_line = t.start_line,
       end_line = t.end_line,
       is_draft = false,
+      resolved = t.resolved == 1,
       last_synced_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     })
     for _, c in ipairs(t.comments or {}) do
@@ -297,6 +298,43 @@ function M.approve_review(number)
   if not ok then
     return false, err
   end
+  return true, nil
+end
+
+--- Resolve or unresolve a comment thread.
+--- Handles both local-only updates for drafts and remote platform calls for synced threads.
+---@param thread_id string
+---@param resolved_val boolean
+---@return boolean, string|nil
+function M.resolve_thread(thread_id, resolved_val)
+  local t = comments.get_thread(thread_id)
+  if not t then
+    return false, "thread not found"
+  end
+
+  -- If it's a draft, just update local storage.
+  if t.is_draft == 1 then
+    comments.resolve_thread(thread_id, resolved_val)
+    return true, nil
+  end
+
+  -- For synced threads, call the remote forge.
+  if not M.current then
+    return false, "no active review; run LocalReviewStart first"
+  end
+  local detail = M.current.detail
+  local resolved = adapter.resolve(M.current.cwd)
+  if not resolved then
+    return false, "no forge remote detected"
+  end
+  local ctx = adapter.ctx(resolved, detail.number)
+  local ok, err = resolved.adapter.resolve_thread(resolved.cfg, ctx, detail.number, thread_id, resolved_val)
+  if not ok then
+    return false, err
+  end
+
+  -- Sync local state on success.
+  comments.resolve_thread(thread_id, resolved_val)
   return true, nil
 end
 

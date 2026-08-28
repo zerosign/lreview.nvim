@@ -68,9 +68,10 @@ function M.refresh(bufnr)
     local cs = comments.comments_for_thread(t.t_id)
     if #cs > 0 then
       local is_draft = (t.is_draft == 1)
-      local sign_hl = is_draft and "LReviewSignDraft" or "LReviewSignSynced"
-      local text_hl = is_draft and "LReviewVirtTextDraft" or "LReviewVirtTextSynced"
-      local sign_text = is_draft and "💬" or "●"
+      local is_resolved = (t.resolved == 1)
+      local sign_hl = is_resolved and "Comment" or (is_draft and "LReviewSignDraft" or "LReviewSignSynced")
+      local text_hl = is_resolved and "Comment" or (is_draft and "LReviewVirtTextDraft" or "LReviewVirtTextSynced")
+      local sign_text = is_resolved and "✔" or (is_draft and "💬" or "●")
 
       local draft_count = 0
       for _, c in ipairs(cs) do
@@ -82,6 +83,9 @@ function M.refresh(bufnr)
       local virt_text_str = string.format("   %d comment(s)", #cs)
       if draft_count > 0 then
         virt_text_str = virt_text_str .. string.format(" (%d draft)", draft_count)
+      end
+      if is_resolved then
+        virt_text_str = virt_text_str .. " (Resolved)"
       end
 
       -- Extmarks are 0-indexed for lines.
