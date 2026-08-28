@@ -27,6 +27,10 @@ M.defaults = {
     decor = "both", -- "sign" | "virtual_text" | "both" | "none"
     float = { width = 0.5, height = 0.6 },
   },
+  sync = {
+    auto_poll = true,
+    interval_mins = 5,
+  },
   open = { method = "checkout" }, -- fetch+checkout the MR branch
 }
 
