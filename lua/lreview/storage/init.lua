@@ -34,6 +34,8 @@ function M.open(db_path)
   end
   db:busy_timeout(config.get_defaults().db.busy_timeout_ms or 5000)
   db:exec("PRAGMA journal_mode=WAL;")
+  db:exec("PRAGMA synchronous=NORMAL;")
+  db:exec("PRAGMA foreign_keys=ON;")
 
   M.db = db
   local okm, errm = M.migrate()
@@ -41,6 +43,7 @@ function M.open(db_path)
     M.close()
     return false, errm
   end
+  M.gc(30)
   return true, nil
 end
 
@@ -90,7 +93,15 @@ function M.migrate()
         if ok ~= 0 then
           return false, "failed to initialize base schema: " .. tostring(err)
         end
-        cur = 3 -- base schema sets it to version 3
+        local cur_row = nil
+        for row in M.db:nrows("SELECT v FROM meta WHERE k = 'schema_version'") do
+          cur_row = row
+        end
+        if cur_row then
+          cur = tonumber(cur_row.v) or 4
+        else
+          cur = 4
+        end
       else
         return false, "could not find schema.sql at " .. sql_file
       end
@@ -164,6 +175,68 @@ function M.execute(sql, ...)
     return nil
   end
   return M.db:last_insert_rowid()
+end
+
+--- Run garbage collection to clean up merged/closed PR comments older than X days.
+--- Protects local drafts from deletion.
+---@param age_days integer|nil
+function M.gc(age_days)
+  if not M.db then
+    return
+  end
+  age_days = age_days or 30
+  local threshold_sec = os.time() - (age_days * 24 * 60 * 60)
+  local date_threshold = os.date("!%Y-%m-%dT%H:%M:%SZ", threshold_sec)
+
+  -- 1. Delete comments belonging to non-draft threads of old merged/closed PRs
+  -- Exclude any comments that are local drafts (remote_id IS NULL).
+  M.execute([[
+    DELETE FROM comments 
+    WHERE remote_id IS NOT NULL 
+      AND t_id IN (
+        SELECT t.t_id FROM threads t
+        JOIN pull_requests pr ON t.mo_id = pr.mo_id
+        WHERE t.is_draft = 0
+          AND pr.state IN ('merged', 'closed')
+          AND pr.updated_at < ?
+      )
+  ]], date_threshold)
+
+  -- 2. Delete non-draft threads of old merged/closed PRs
+  -- Exclude any threads that contain local draft replies (to prevent orphaned comments).
+  M.execute([[
+    DELETE FROM threads 
+    WHERE is_draft = 0 
+      AND mo_id IN (
+        SELECT mo_id FROM pull_requests
+        WHERE state IN ('merged', 'closed')
+          AND updated_at < ?
+      )
+      AND t_id NOT IN (
+        SELECT DISTINCT t_id FROM comments WHERE remote_id IS NULL
+      )
+  ]], date_threshold)
+
+  -- 3. Delete reviews of old merged/closed PRs
+  M.execute([[
+    DELETE FROM reviews 
+    WHERE mo_id IN (
+      SELECT mo_id FROM pull_requests
+      WHERE state IN ('merged', 'closed')
+        AND updated_at < ?
+    )
+  ]], date_threshold)
+
+  -- 4. Delete old merged/closed PRs
+  -- Exclude PRs that still have active threads (which might contain drafts).
+  M.execute([[
+    DELETE FROM pull_requests
+    WHERE state IN ('merged', 'closed')
+      AND updated_at < ?
+      AND mo_id NOT IN (
+        SELECT DISTINCT mo_id FROM threads
+      )
+  ]], date_threshold)
 end
 
 return M

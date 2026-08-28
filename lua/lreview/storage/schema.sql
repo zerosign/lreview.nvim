@@ -65,4 +65,4 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 -- Seed the initial schema version
-INSERT OR REPLACE INTO meta (k, v) VALUES ('schema_version', '3');
+INSERT OR REPLACE INTO meta (k, v) VALUES ('schema_version', '4');

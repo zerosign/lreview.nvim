@@ -1,0 +1,144 @@
+*lreview.txt*   Unified MR/PR Code Review inside Neovim            August 2026
+
+==============================================================================
+INTRODUCTION                                                 *lreview-intro*
+
+|lreview.nvim| is a fast, asynchronous code review plugin for Neovim that 
+unifies review operations across GitHub, GitLab, and other code hosts. It 
+leverages local SQLite caching for sub-millisecond thread loading and offloads
+all remote networking to background asynchronous CLI execution.
+
+Main Features:
+- Asynchronous non-blocking background pulls.
+- Offline-first cache: loads thread lists instantly via SQLite WAL.
+- Soft-deletion: handles deleted remote comments gracefully without breaking
+  nested reply threads.
+- Auto-Garbage Collection: automatically purges old closed or merged reviews on
+  startup, strictly protecting your local drafts.
+- Multi-repository awareness: resolves context dynamically, allowing multiple
+  forks and project reviews to coexist in the same database without conflicts.
+
+==============================================================================
+INSTALLATION                                          *lreview-installation*
+
+Using |lazy.nvim|:
+>lua
+  require("lazy").setup({
+    {
+      "zerosign/lreview.nvim",
+      dependencies = {
+        "kkharji/sqlite.lua", -- SQLite wrapper dependency
+      },
+      opts = {
+        defaults = {
+          db_path = vim.fn.stdpath("data") .. "/lreview/lreview.db",
+        },
+        ["github\\.com"] = {
+          adapter = "github",
+          provider = "gh",
+          host = "github.com",
+        },
+        ["gitlab\\.com|gitlab\\..*"] = {
+          adapter = "gitlab",
+          provider = "glab",
+          host = "gitlab.com",
+        },
+      },
+    }
+  })
+<
+
+==============================================================================
+CONFIGURATION                                        *lreview-configuration*
+
+The plugin is configured by passing an options table to `setup()`:
+>lua
+  require("lreview").setup(opts)
+<
+
+Global Settings ~
+Inside the `defaults` block of your configuration:
+
+  `db_path`           (string)
+                      Absolute path to the SQLite cache file.
+                      Default: `vim.fn.stdpath("data") .. "/lreview/lreview.db"`
+
+  `db.busy_timeout_ms` (number)
+                      SQLite busy lock timeout in milliseconds.
+                      Default: `5000`
+
+  `db.keep_days`      (number)
+                      Number of days to preserve closed/merged pull requests.
+                      Default: `30`
+
+  `ui.decor`          (string)
+                      How inline comment indicators are rendered in buffers.
+                      Options:
+                        "both"         Render both signs and virtual text.
+                        "sign"         Render sign column symbols only.
+                        "virtual_text" Render virtual text only.
+                        "none"         Disable inline annotations.
+                      Default: `"both"`
+
+  `ui.float.width`    (number)
+                      Width of floating thread panel (percentage of window).
+                      Default: `0.5` (50%)
+
+  `ui.float.height`   (number)
+                      Height of floating thread panel (percentage of window).
+                      Default: `0.6` (60%)
+
+  `open.method`       (string)
+                      Action to execute when starting a review branch.
+                      Default: `"checkout"`
+
+Per-Domain Configurations ~
+Keyed by a pattern (Lua matching) matching the remote repository domain (e.g.
+`["gitlab\\.mycompany\\.com"]`). Supports these configuration attributes:
+
+  `adapter`           (string) Platform adapter (`"github"` or `"gitlab"`).
+  `provider`          (string) CLI binary command to run (`"gh"` or `"glab"`).
+  `host`              (string) API host domain.
+
+==============================================================================
+USER COMMANDS                                             *lreview-commands*
+
+`:LocalReviewStart` [<branch-or-url>]
+                      Resolves the repository target MR, initializes database
+                      schema connection, and triggers an asynchronous pull.
+
+`:LocalReviewPull`
+                      Manually triggers an asynchronous remote pull to update
+                      comments and threads for the active review.
+
+`:LocalReviewList`
+                      Generates a Neovim Quickfix list containing all open
+                      threads for the current merge request.
+
+==============================================================================
+FLOATING PANEL KEYBINDINGS                              *lreview-keybindings*
+
+When viewing a floating comment thread panel, the following default keybinds
+are active on the buffer:
+
+  `r`                 Reply: opens a reply window to post a reply.
+  `e`                 Edit: edit an existing local draft comment.
+  `d`                 Delete: delete a local draft comment.
+  `s`                 Resolve/Reopen: toggles the resolved status of the active
+                      discussion thread.
+  `q`                 Close: closes the floating thread panel.
+
+==============================================================================
+GARBAGE COLLECTION                                              *lreview-gc*
+
+SQLite garbage collection runs automatically on database initialization. 
+Any PR/MR marked `merged` or `closed` whose last update is older than the
+configured `db.keep_days` (default 30 days) is swept from SQLite.
+
+To safeguard your data:
+- Draft comments (`remote_id IS NULL`) are NEVER deleted.
+- Threads containing unsubmitted drafts are skipped from deletion.
+- PRs containing active draft threads are preserved.
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:
