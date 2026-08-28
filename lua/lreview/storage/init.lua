@@ -33,6 +33,7 @@ function M.open(db_path)
     return false, "failed to open sqlite db: " .. db_path
   end
   db:busy_timeout(config.get_defaults().db.busy_timeout_ms or 5000)
+  db:exec("PRAGMA journal_mode=WAL;")
 
   M.db = db
   local okm, errm = M.migrate()
