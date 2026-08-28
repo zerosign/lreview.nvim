@@ -46,7 +46,7 @@ end
 function M.resolve_current_mr(cwd)
   local resolved = adapter.resolve(cwd)
   if not resolved then
-    return nil, "no forge remote detected in this repo"
+    return nil, "no git remote detected in this repo"
   end
   local branch = git.current_branch(cwd)
   local ctx = adapter.ctx(resolved, branch)
@@ -136,7 +136,7 @@ function M.submit_review()
   local detail = M.current.detail
   local resolved = adapter.resolve(M.current.cwd)
   if not resolved then
-    return 0, "no forge remote detected"
+    return 0, "no git remote detected"
   end
   local ctx = adapter.ctx(resolved, detail.number)
 
@@ -192,7 +192,7 @@ function M.sync_review()
   local detail = M.current.detail
   local resolved = adapter.resolve(M.current.cwd)
   if not resolved then
-    return 0, "no forge remote detected"
+    return 0, "no git remote detected"
   end
   local ctx = adapter.ctx(resolved, detail.number)
   local remote_threads, err = resolved.adapter.fetch_threads(resolved.cfg, ctx, detail.number, detail.mo_id)
@@ -255,7 +255,7 @@ end
 function M.list_templates(cwd)
   local resolved = adapter.resolve(cwd or vim.fn.getcwd())
   if not resolved then
-    return nil, "no forge remote detected"
+    return nil, "no git remote detected"
   end
   local ctx = adapter.ctx(resolved)
   return resolved.adapter.list_templates(resolved.cfg, ctx)
@@ -268,7 +268,7 @@ end
 function M.create_review(opts, cwd)
   local resolved = adapter.resolve(cwd or vim.fn.getcwd())
   if not resolved then
-    return nil, "no forge remote detected"
+    return nil, "no git remote detected"
   end
   local ctx = adapter.ctx(resolved)
   local url, err = resolved.adapter.create_mr(resolved.cfg, ctx, opts)
@@ -292,7 +292,7 @@ function M.close_review(number)
   local cwd = M.current and M.current.cwd or vim.fn.getcwd()
   local resolved = adapter.resolve(cwd)
   if not resolved then
-    return false, "no forge remote detected"
+    return false, "no git remote detected"
   end
   local ctx = adapter.ctx(resolved, num)
   local ok, err = resolved.adapter.close_mr(resolved.cfg, ctx, num)
@@ -316,7 +316,7 @@ function M.approve_review(number)
   local cwd = M.current and M.current.cwd or vim.fn.getcwd()
   local resolved = adapter.resolve(cwd)
   if not resolved then
-    return false, "no forge remote detected"
+    return false, "no git remote detected"
   end
   local ctx = adapter.ctx(resolved, num)
   local ok, err = resolved.adapter.approve_mr(resolved.cfg, ctx, num)
@@ -350,7 +350,7 @@ function M.resolve_thread(thread_id, resolved_val)
   local detail = M.current.detail
   local resolved = adapter.resolve(M.current.cwd)
   if not resolved then
-    return false, "no forge remote detected"
+    return false, "no git remote detected"
   end
   local ctx = adapter.ctx(resolved, detail.number)
   local ok, err = resolved.adapter.resolve_thread(resolved.cfg, ctx, detail.number, thread_id, resolved_val)

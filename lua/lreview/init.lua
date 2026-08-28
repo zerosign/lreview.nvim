@@ -30,7 +30,7 @@ function M.register_commands()
     local scope = args.args ~= "" and args.args or "mine"
     local resolved = adapter.resolve(vim.fn.getcwd())
     if not resolved then
-      vim.notify("lreview: no forge remote detected", vim.log.levels.WARN)
+      vim.notify("lreview: no git remote detected", vim.log.levels.WARN)
       return
     end
     local ctx = adapter.ctx(resolved)
@@ -56,7 +56,7 @@ function M.register_commands()
   api.nvim_create_user_command("LocalReviewDetail", function(args)
     local resolved = adapter.resolve(vim.fn.getcwd())
     if not resolved then
-      vim.notify("lreview: no forge remote detected", vim.log.levels.WARN)
+      vim.notify("lreview: no git remote detected", vim.log.levels.WARN)
       return
     end
     local ref = args.args ~= "" and args.args or nil
@@ -91,7 +91,7 @@ function M.register_commands()
     local cwd = vim.fn.getcwd()
     local resolved = adapter.resolve(cwd)
     if not resolved then
-      vim.notify("lreview: no forge remote detected", vim.log.levels.WARN)
+      vim.notify("lreview: no git remote detected", vim.log.levels.WARN)
       return
     end
     local ctx = adapter.ctx(resolved)
