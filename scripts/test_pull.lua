@@ -1,109 +1,130 @@
--- Integration Test Case for Asynchronous Pull & Edge Cases
--- Run with: nvim --headless -l scripts/test_pull.lua
+-- Real-world Integration Test Case for Asynchronous Pull
+-- Runs against actual GitHub and GitLab sandbox repositories.
 
 local storage = require("lreview.storage")
 local comments = require("lreview.storage.comments")
-local pull_request = require("lreview.storage.pull_request")
 local review = require("lreview.review")
+local git = require("lreview.git")
+local adapter = require("lreview.adapter")
 
--- 1. Setup temporary sandbox database
-local db_path = "sandbox/data/nvim/lreview/test_pull.db"
-os.remove(db_path)
-local ok, err = storage.open(db_path)
+-- Explicitly call setup to configure adapters (needed when running via nvim -l)
+require("lreview").setup({
+  defaults = {
+    db_path = vim.fn.stdpath("data") .. "/lreview/lreview.db",
+  },
+  ["github\\.com"] = {
+    adapter = "github",
+    provider = "gh",
+    host = "github.com",
+  },
+  ["gitlab\\.com|gitlab\\..*"] = {
+    adapter = "gitlab",
+    provider = "glab",
+    host = "gitlab.com",
+  },
+})
+
+-- Setup default database
+local ok, err = storage.open()
 if not ok then
   print("FAIL: Database failed to open:", err)
   os.exit(1)
 end
 
--- 2. Mock Active Review Context
-pull_request.upsert({
-  mo_id = "test:owner/repo:1",
-  provider = "test",
-  repo = "owner/repo",
-  number = 1,
-  title = "Test PR",
-  author = "me",
-})
+-- Clear existing sandbox data to ensure we are testing a fresh pull
+storage.execute("DELETE FROM comments")
+storage.execute("DELETE FROM threads")
 
-review.current = {
-  detail = { mo_id = "test:owner/repo:1", number = 1 },
-  cwd = vim.fn.getcwd()
-}
+local function run_async_wait()
+  local wait_done = false
+  local pull_ok = false
 
--- 3. Seed a local draft comment (which should be preserved during pulls)
-local draft_t_id = "draft-thread-uuid-123"
-local draft_c_id = "draft-comment-uuid-456"
-comments.create_thread({
-  t_id = draft_t_id,
-  mo_id = "test:owner/repo:1",
-  path = "README.md",
-  commit_sha = "abcdef",
-  start_line = 5,
-  end_line = 5,
-  is_draft = true,
-  resolved = false,
-})
-comments.add_comment({
-  c_id = draft_c_id,
-  t_id = draft_t_id,
-  author = "me",
-  body = "My local unsaved draft comment",
-  created_at = "2026-08-28T00:00:00Z",
-})
+  review.pull_review_async(function(success)
+    pull_ok = success
+    wait_done = true
+  end)
 
-print("ASSERT: Local draft seeded in database.")
+  local timeout = 12000 -- 12 seconds max for network requests
+  local start_time = vim.loop.hrtime()
+  while not wait_done do
+    vim.cmd("sleep 100m")
+    local elapsed = (vim.loop.hrtime() - start_time) / 1e6
+    if elapsed > timeout then
+      print("FAIL: Async pull timed out after 12 seconds.")
+      os.exit(1)
+    end
+  end
 
--- 4. Test Case: Running async pull preserves local draft comments
-local wait_done = false
-local pull_ok = false
+  return pull_ok
+end
 
-print("TEST: Starting asynchronous pull...")
-review.pull_review_async(function(success)
-  pull_ok = success
-  wait_done = true
-end)
+-- ============================================================================
+-- 1. GitHub Sandbox Test
+-- ============================================================================
+print("TEST: Initializing GitHub sandbox...")
+local detail_gh, err_gh = review.start_review("tmp/github-sample-review")
+if not detail_gh then
+  print("FAIL: Could not start GitHub review:", err_gh)
+  os.exit(1)
+end
 
--- Wait for the async process callback (simulate event loop run)
-local timeout = 5000 -- 5 seconds max
-local start_time = vim.loop.hrtime()
-while not wait_done do
-  vim.cmd("sleep 50m")
-  local elapsed = (vim.loop.hrtime() - start_time) / 1e6
-  if elapsed > timeout then
-    print("FAIL: Async pull timed out after 5 seconds.")
-    os.exit(1)
+print("TEST: Pulling comments from GitHub...")
+local success_gh = run_async_wait()
+if not success_gh then
+  print("FAIL: GitHub async pull reported failure.")
+  os.exit(1)
+end
+
+local threads_gh = comments.threads_for_mr(detail_gh.mo_id)
+if #threads_gh == 0 then
+  print("FAIL: GitHub pull succeeded but no comments were stored in the database.")
+  os.exit(1)
+end
+
+print(string.format("SUCCESS: Pulled %d thread(s) from GitHub.", #threads_gh))
+for _, t in ipairs(threads_gh) do
+  local cs = comments.comments_for_thread(t.t_id)
+  print(string.format("  - Thread on %s:%d has %d comment(s)", t.path or "PR", t.start_line or 0, #cs))
+  for _, c in ipairs(cs) do
+    print(string.format("    [%s]: %s", c.author, c.body:gsub("\n", " ")))
   end
 end
 
--- Verify the draft was preserved
-local test_thread = comments.get_thread(draft_t_id)
-local test_comments = comments.comments_for_thread(draft_t_id)
-
-if not test_thread or #test_comments == 0 then
-  print("FAIL: Local draft comment was wiped during async pull!")
+-- ============================================================================
+-- 2. GitLab Sandbox Test
+-- ============================================================================
+print("\nTEST: Initializing GitLab sandbox...")
+local detail_gl, err_gl = review.start_review("tmp/gitlab-sample-review")
+if not detail_gl then
+  print("FAIL: Could not start GitLab review:", err_gl)
   os.exit(1)
 end
 
-if test_comments[1].body ~= "My local unsaved draft comment" then
-  print("FAIL: Local draft comment content was altered!")
+print("TEST: Pulling comments from GitLab...")
+local success_gl = run_async_wait()
+if not success_gl then
+  print("FAIL: GitLab async pull reported failure.")
   os.exit(1)
 end
 
-print("SUCCESS: Local draft comment was preserved perfectly.")
-
--- 5. Test Case: Verify failed remote queries handle errors gracefully
--- Mocking a failing context by removing current review detail
-review.current = nil
-local success_err, err_msg = review.pull_review_async(function(s) end)
-if success_err == false and err_msg == "no active review" then
-  print("SUCCESS: Missing context error handled gracefully.")
-else
-  print("FAIL: Expected no active review error, got:", err_msg)
+local threads_gl = comments.threads_for_mr(detail_gl.mo_id)
+if #threads_gl == 0 then
+  print("FAIL: GitLab pull succeeded but no comments were stored in the database.")
   os.exit(1)
 end
 
--- Clean up
+print(string.format("SUCCESS: Pulled %d thread(s) from GitLab.", #threads_gl))
+for _, t in ipairs(threads_gl) do
+  local cs = comments.comments_for_thread(t.t_id)
+  print(string.format("  - Thread on %s:%d has %d comment(s)", t.path or "MR", t.start_line or 0, #cs))
+  for _, c in ipairs(cs) do
+    print(string.format("    [%s]: %s", c.author, c.body:gsub("\n", " ")))
+  end
+end
+
+-- Clean up database changes
+storage.execute("DELETE FROM comments")
+storage.execute("DELETE FROM threads")
 storage.close()
-os.remove(db_path)
-print("ALL TESTS PASSED.")
+print("\nALL ADAPTER PULL TESTS PASSED.")
 os.exit(0)

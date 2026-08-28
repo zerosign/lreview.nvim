@@ -66,6 +66,11 @@ end
 ---@param cwd string|nil
 ---@return lreview.MRDetail|nil, string|nil
 function M.start_review(cwd)
+  cwd = vim.fn.fnamemodify(cwd or vim.fn.getcwd(), ":p")
+  if cwd:sub(-1) == "/" or cwd:sub(-1) == "\\" then
+    cwd = cwd:sub(1, -2)
+  end
+
   local detail, err = M.resolve_current_mr(cwd)
   if not detail then
     return nil, err
@@ -349,10 +354,15 @@ function M.pull_review_async(callback)
     return false, "no active review"
   end
 
-  local current_cwd = M.current.cwd
+  local plugin_root = vim.fn.fnamemodify(debug.getinfo(1).source:match("@(.*)$"), ":h:h:h")
+  local current_cwd = M.current.cwd or vim.fn.getcwd()
   local cmd = {
     vim.v.progpath,
     "--headless",
+    "--cmd",
+    "set runtimepath^=" .. vim.fn.escape(plugin_root, " "),
+    "-c",
+    string.format("lua require('lreview').api.start_review(%q)", current_cwd),
     "-c",
     "lua require('lreview').api.sync_review()",
     "-c",
@@ -362,6 +372,11 @@ function M.pull_review_async(callback)
   vim.system(cmd, { cwd = current_cwd }, function(res)
     vim.schedule(function()
       local success = (res.code == 0)
+      if res.code ~= 0 or (res.stderr and res.stderr ~= "") then
+        print("Child process failed with code: " .. tostring(res.code))
+        print("Child STDOUT: " .. tostring(res.stdout))
+        print("Child STDERR: " .. tostring(res.stderr))
+      end
       if success then
         -- Refresh highlights on active buffers
         local decor = require("lreview.ui.decor")

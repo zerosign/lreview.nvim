@@ -89,13 +89,17 @@ function M.run(argv, opts)
   local combined = stdout .. "\n" .. stderr
 
   local ok = res.code == 0 and not looks_like_error(combined)
+  local err_msg = nil
+  if not ok then
+    err_msg = string.format("Command failed: %s | Error: %s", table.concat(argv, " "), normalize_error(combined))
+  end
   return {
     ok = ok,
     stdout = stdout,
     stderr = stderr,
     combined = combined,
     code = res.code,
-    error = ok and nil or normalize_error(combined),
+    error = err_msg,
   }
 end
 
