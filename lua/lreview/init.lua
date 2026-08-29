@@ -60,6 +60,18 @@ function M.register_commands()
       return
     end
     local ref = args.args ~= "" and args.args or nil
+    if not ref then
+      if review.current then
+        ref = tostring(review.current.detail.number)
+      else
+        local branch = git.current_branch(vim.fn.getcwd())
+        if branch == "master" or branch == "main" or branch == "develop" then
+          vim.notify("lreview: on default branch '" .. branch .. "'; please specify a PR/MR number or branch name", vim.log.levels.WARN)
+          return
+        end
+        ref = branch
+      end
+    end
     local ctx = adapter.ctx(resolved, ref)
     local detail, err = resolved.adapter.get_mr_detail(resolved.cfg, ctx)
     if not detail then
