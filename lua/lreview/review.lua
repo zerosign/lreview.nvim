@@ -325,30 +325,46 @@ function M.approve_review(number)
   end
   return true, nil
 end
---- Update the active MR/PR's title and description.
+--- Update an MR/PR's title and description.
 ---@param title string
 ---@param body string
+---@param number integer|nil
+---@param cwd string|nil
 ---@return boolean, string|nil
-function M.update_review(title, body)
-  if not M.current then
+function M.update_review(title, body, number, cwd)
+  local num = number or (M.current and M.current.detail.number)
+  if not num then
     return false, "no active review"
   end
-  local detail = M.current.detail
-  local cwd = M.current.cwd or vim.fn.getcwd()
+  cwd = cwd or (M.current and M.current.cwd) or vim.fn.getcwd()
   local resolved = adapter.resolve(cwd)
   if not resolved then
     return false, "no git remote detected"
   end
-  local ctx = adapter.ctx(resolved, detail.number)
-  local ok, err = resolved.adapter.update_mr(resolved.cfg, ctx, detail.number, title, body)
+  local ctx = adapter.ctx(resolved, num)
+  local ok, err = resolved.adapter.update_mr(resolved.cfg, ctx, num, title, body)
   if not ok then
     return false, err
   end
-  -- Update local cached details
-  detail.title = title
-  detail.body = body
+
+  -- Update local cached details if active
+  if M.current and M.current.detail.number == num then
+    M.current.detail.title = title
+    M.current.detail.body = body
+  end
+
   local pull_request = require("lreview.storage.pull_request")
-  pull_request.upsert(detail)
+  local ok_storage = storage.open()
+  if ok_storage then
+    local key = resolved.provider .. ":" .. resolved.repo .. ":" .. num
+    local cached = pull_request.get(key)
+    if cached then
+      cached.title = title
+      cached.body = body
+      pull_request.upsert(cached)
+    end
+  end
+
   return true, nil
 end
 

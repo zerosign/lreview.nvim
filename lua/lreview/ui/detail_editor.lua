@@ -90,7 +90,7 @@ function M.open(detail)
       local title, desc = parse_buffer(bufnr)
       vim.notify("lreview: updating MR details on " .. detail.provider .. "...", vim.log.levels.INFO)
       
-      local ok, err = review.update_review(title, desc)
+      local ok, err = review.update_review(title, desc, detail.number, vim.fn.getcwd())
       if not ok then
         vim.notify("lreview: failed to update MR: " .. tostring(err), vim.log.levels.ERROR)
         return
