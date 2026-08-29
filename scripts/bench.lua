@@ -169,5 +169,28 @@ for _, group in ipairs({ "READ", "WRITE", "UPDATE", "DELETE" }) do
   print(string.rep("-", 68))
 end
 
+-- 8. Git Helper Benchmarks
+print("\n" .. string.rep("=", 68))
+print("GIT UTILITIES PERFORMANCE BENCHMARK")
+print(string.rep("=", 68))
+
+local git = require("lreview.git")
+
+local stat_ms = profile("git_root_stat", function()
+  for _ = 1, 1000 do
+    git.root(".")
+  end
+end)
+print(string.format("git.root (1000 in-memory directory traversals): %.4f ms", stat_ms))
+
+local cli_ms = profile("git_root_cli", function()
+  -- Spawning 1000 processes takes too long; we do 10 to demonstrate difference
+  for _ = 1, 10 do
+    vim.fn.system("git rev-parse --show-toplevel")
+  end
+end)
+print(string.format("git CLI (10 shell command process spawns):      %.4f ms", cli_ms))
+print(string.rep("=", 68))
+
 storage.close()
 os.remove(db_path)
