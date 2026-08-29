@@ -283,6 +283,11 @@ function M.submit_review()
     if not ok then
       return 0, err
     end
+    -- Clear local drafts on success
+    for _, nt in ipairs(new_threads_batch) do
+      comments.delete_comment(nt.c_id)
+      comments.delete_thread(nt.t_id)
+    end
     count = count + #new_threads_batch
   end
 
@@ -292,6 +297,8 @@ function M.submit_review()
     if not comment_id then
       return count, err
     end
+    -- Clear local draft reply on success
+    comments.delete_comment(r.c_id)
     count = count + 1
   end
 
