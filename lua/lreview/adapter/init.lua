@@ -21,11 +21,18 @@ local adapters = {
   gitlab = require("lreview.adapter.gitlab"),
 }
 
---- Get an adapter by name.
+--- Get an adapter by name. Supports dynamic loading of custom adapter modules.
 ---@param name string
 ---@return table|nil
 function M.get(name)
-  return adapters[name]
+  local adapter = adapters[name]
+  if not adapter then
+    local ok, mod = pcall(require, name)
+    if ok then
+      return mod
+    end
+  end
+  return adapter
 end
 
 --- Resolve the active adapter context for a directory.
@@ -41,7 +48,7 @@ function M.resolve(cwd)
     return nil
   end
   local adapter_name = cfg.adapter or "github"
-  local adapter = adapters[adapter_name]
+  local adapter = M.get(adapter_name)
   if not adapter then
     return nil
   end
