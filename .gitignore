@@ -76,6 +76,7 @@ sandbox/cache/
 sandbox/state/
 sandbox/data/
 sandbox/config/
+sandbox/luarocks/
 *.db
 *.luac
 *.log
