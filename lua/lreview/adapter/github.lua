@@ -474,4 +474,27 @@ function M.resolve_thread(cfg, ctx, mr_number, thread_id, resolved)
   return true, nil
 end
 
+--- Update the PR title and body on GitHub.
+---@param cfg table
+---@param ctx table
+---@param number integer
+---@param title string
+---@param body string
+---@return boolean, string|nil
+function M.update_mr(cfg, ctx, number, title, body)
+  local argv = base_argv(cfg, ctx)
+  argv[#argv + 1] = "pr"
+  argv[#argv + 1] = "edit"
+  argv[#argv + 1] = tostring(number)
+  argv[#argv + 1] = "--title"
+  argv[#argv + 1] = title
+  argv[#argv + 1] = "--body"
+  argv[#argv + 1] = body
+  local res = base.run(argv, { cwd = ctx.cwd })
+  if not res.ok then
+    return false, res.error
+  end
+  return true, nil
+end
+
 return M

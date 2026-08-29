@@ -325,6 +325,32 @@ function M.approve_review(number)
   end
   return true, nil
 end
+--- Update the active MR/PR's title and description.
+---@param title string
+---@param body string
+---@return boolean, string|nil
+function M.update_review(title, body)
+  if not M.current then
+    return false, "no active review"
+  end
+  local detail = M.current.detail
+  local cwd = M.current.cwd or vim.fn.getcwd()
+  local resolved = adapter.resolve(cwd)
+  if not resolved then
+    return false, "no git remote detected"
+  end
+  local ctx = adapter.ctx(resolved, detail.number)
+  local ok, err = resolved.adapter.update_mr(resolved.cfg, ctx, detail.number, title, body)
+  if not ok then
+    return false, err
+  end
+  -- Update local cached details
+  detail.title = title
+  detail.body = body
+  local pull_request = require("lreview.storage.pull_request")
+  pull_request.upsert(detail)
+  return true, nil
+end
 
 --- Resolve or unresolve a comment thread.
 --- Handles both local-only updates for drafts and remote platform calls for synced threads.

@@ -70,8 +70,7 @@ function M.register_commands()
     if ok then
       require("lreview.storage.pull_request").upsert(detail)
     end
-    -- TODO: render detail into a buffer (UI layer).
-    vim.notify(string.format("lreview: %s #%d %s", detail.provider, detail.number, detail.title), vim.log.levels.INFO)
+    require("lreview.ui.detail_editor").open(detail)
   end, { nargs = "?" })
 
   -- LocalReviewStart: begin a local review of the current branch's MR.
@@ -260,6 +259,7 @@ M.api = {
   decor = require("lreview.ui.decor"),
   thread_view = require("lreview.ui.thread_view"),
   editor = require("lreview.ui.editor"),
+  detail_editor = require("lreview.ui.detail_editor"),
   list = require("lreview.ui.list"),
   start_review = review.start_review,
   add_comment = review.add_comment,
