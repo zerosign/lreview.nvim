@@ -166,6 +166,42 @@ The plugin highlights gutter line numbers and signs to represent review statuses
 
 ---
 
+## Adding Custom Platform Adapters (Backends)
+
+`lreview.nvim` is fully extensible. You can add support for other hosting platforms (e.g. Gitea, Sourcehut, or custom internal systems) by defining a custom adapter module and registering it through the `opts` setup without changing any plugin code:
+
+1. **Create your custom adapter file** (e.g. `lua/my_adapters/gitea.lua`):
+   ```lua
+   local M = {}
+   M.name = "gitea"
+   M.provider = "gitea-cli"
+
+   -- Implement the standard adapter contract functions:
+   function M.query(cfg, scope, ctx) ... end
+   function M.get_mr(cfg, ctx) ... end
+   function M.fetch_comments(cfg, ctx, last_sync) ... end
+   function M.create_comment(cfg, ctx, path, line, body) ... end
+   function M.create_reply(cfg, ctx, reply_to_id, body) ... end
+   function M.edit_comment(cfg, ctx, remote_comment_id, body) ... end
+   function M.delete_comment(cfg, ctx, remote_comment_id) ... end
+   function M.resolve_thread(cfg, ctx, remote_thread_id, resolved) ... end
+
+   return M
+   ```
+
+2. **Register it in your configuration:**
+   ```lua
+   opts = {
+     ["gitea\\.mycompany\\.com"] = {
+       adapter = "my_adapters.gitea", -- Dynamically required on remote host match
+       provider = "gitea-cli",
+       host = "gitea.mycompany.com",
+     }
+   }
+   ```
+
+---
+
 ## Performance & Caching Details
 
 - **WAL Mode:** SQLite is initialized with Write-Ahead Logging (`journal_mode=WAL`) and `synchronous=NORMAL` to handle parallel disk commits instantly without freezing Neovim's main render loop.

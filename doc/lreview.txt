@@ -191,6 +191,44 @@ sequentially in a split buffer. Key actions are cursor-aware:
   `q`                 Close: closes the thread view panel.
 
 ==============================================================================
+CUSTOM ADAPTERS                                            *lreview-custom-adapters*
+
+lreview.nvim supports custom platform adapters (e.g. Gitea, Sourcehut, or internal
+code hosts) without editing plugin files. You define a Lua module in your runtime
+path (e.g. `lua/my_adapters/gitea.lua`) and specify its path in `opts`.
+
+An adapter module must return a table implementing these standard methods:
+
+  `query(cfg, scope, ctx)`
+                      Returns a list of PR/MR model maps.
+  `get_mr(cfg, ctx)`
+                      Returns detailed metadata for a single PR/MR.
+  `fetch_comments(cfg, ctx, last_sync)`
+                      Returns list of comments and threads from host.
+  `create_comment(cfg, ctx, path, line, body)`
+                      Creates a new remote inline comment thread.
+  `create_reply(cfg, ctx, reply_to_id, body)`
+                      Posts a reply comment on an existing thread.
+  `edit_comment(cfg, ctx, remote_comment_id, body)`
+                      Edits a remote comment.
+  `delete_comment(cfg, ctx, remote_comment_id)`
+                      Deletes a remote comment.
+  `resolve_thread(cfg, ctx, remote_thread_id, resolved)`
+                      Toggles thread resolution state on remote host.
+
+Configure the custom adapter under `opts` using its Lua require module name:
+
+>
+  require("lreview").setup({
+    ["gitea\\.mycompany\\.com"] = {
+      adapter = "my_adapters.gitea", -- Dynamically loaded on remote match
+      provider = "gitea-cli",
+      host = "gitea.mycompany.com",
+    }
+  })
+<
+
+==============================================================================
 GARBAGE COLLECTION                                              *lreview-gc*
 
 SQLite garbage collection runs on database initialization when
