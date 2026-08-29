@@ -221,8 +221,13 @@ function M.open_edit(c_id, current_body)
   create_scratchpad(current_body, function(text)
     local submit_immediately = config.get_defaults().submit_immediately
     local c = storage.query("SELECT * FROM comments WHERE c_id = ?", c_id)[1]
-    if submit_immediately and c and c.remote_id then
-      vim.notify("lreview: updating comment immediately...", vim.log.levels.INFO)
+    local is_synced = c and c.remote_id and c.remote_id ~= ""
+    if submit_immediately or is_synced then
+      if is_synced then
+        vim.notify("lreview: updating synced comment remote-side...", vim.log.levels.INFO)
+      else
+        vim.notify("lreview: updating comment immediately...", vim.log.levels.INFO)
+      end
       local ok, err = review.push_edit_immediately(c_id, text)
       if not ok then
         vim.notify("lreview: failed to update comment: " .. tostring(err), vim.log.levels.ERROR)

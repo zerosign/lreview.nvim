@@ -107,10 +107,9 @@ local function handle_action(action)
     require("lreview.ui.editor").open_reply(M.state.thread_id)
   elseif action == "edit" then
     if not c_id then
-      vim.notify("lreview: move cursor onto a draft comment to edit it", vim.log.levels.WARN)
+      vim.notify("lreview: move cursor onto a comment to edit it", vim.log.levels.WARN)
       return
     end
-    -- Verify if the selected comment is a draft.
     local ts = comments.comments_for_thread(M.state.thread_id)
     local target_comment
     for _, c in ipairs(ts) do
@@ -119,10 +118,7 @@ local function handle_action(action)
         break
       end
     end
-    if not target_comment or (target_comment.remote_id and target_comment.remote_id ~= "") then
-      vim.notify("lreview: synced comments cannot be edited", vim.log.levels.WARN)
-      return
-    end
+    if not target_comment then return end
     require("lreview.ui.editor").open_edit(c_id, target_comment.body)
   elseif action == "delete" then
     if not c_id then
