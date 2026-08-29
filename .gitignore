@@ -75,6 +75,7 @@ tmp/
 sandbox/cache/
 sandbox/state/
 sandbox/data/
+sandbox/config/
 *.db
 *.luac
 *.log
