@@ -277,6 +277,29 @@ Custom adapter methods must return Lua tables conforming to these models:
 
 
 ==============================================================================
+DATABASE ENGINE & CONCURRENCY                         *lreview-database-engine*
+
+lreview.nvim utilizes `kkharji/sqlite.lua` to access SQLite caches.
+
+SQLite Flavors ~
+The plugin automatically detects the running Lua environment:
+  - If running in LuaJIT (default in Neovim), it dynamically binds directly to
+    the system `libsqlite3.so` using FFI (Foreign Function Interface) for native
+    execution speed and zero-overhead editor starts.
+  - If FFI is unavailable, it gracefully falls back to the standard LuaRocks
+    `lsqlite3` library.
+
+WAL Mode & Concurrency ~
+To support asynchronous operations (such as background thread pull jobs) without
+locking the user interface, SQLite is opened with WAL (Write-Ahead Logging):
+  `PRAGMA journal_mode=WAL;`
+  `PRAGMA synchronous=NORMAL;`
+
+This enables concurrent read and write operations. The background cleaner worker
+thread and Neovim editor processes can query and insert comments concurrently
+without lockouts.
+
+==============================================================================
 GARBAGE COLLECTION                                              *lreview-gc*
 
 SQLite garbage collection runs on database initialization when

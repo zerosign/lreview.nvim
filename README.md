@@ -204,8 +204,9 @@ The plugin highlights gutter line numbers and signs to represent review statuses
 
 ## Performance & Caching Details
 
-- **WAL Mode:** SQLite is initialized with Write-Ahead Logging (`journal_mode=WAL`) and `synchronous=NORMAL` to handle parallel disk commits instantly without freezing Neovim's main render loop.
-- **Safety Gate Keepers:** Automatic garbage collection runs on startup. Old closed reviews are deleted to keep the database size minimal. **Local drafts and threads with draft comments are strictly preserved and skipped by the garbage collector.**
+- **SQLite Engine Compatibility (Flavors):** The storage layer dynamically binds to the system `libsqlite3.so` library using **LuaJIT FFI** (Foreign Function Interface) for native C execution speed and zero-overhead Neovim startup. If LuaJIT FFI is unavailable, it automatically falls back to loading the standard LuaRocks `lsqlite3` module.
+- **WAL Mode & Concurrency:** SQLite is initialized with Write-Ahead Logging (`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`) to support concurrent read and write operations. This prevents SQLite lockups and lets background pull workers update comments without blocking the main Neovim thread.
+- **Safety Gate Keepers:** Automatic garbage collection runs asynchronously on startup. Old closed/merged reviews are deleted to keep the database size minimal. **Local drafts and threads with draft comments are strictly preserved and skipped by the garbage collector.**
 
 ---
 
