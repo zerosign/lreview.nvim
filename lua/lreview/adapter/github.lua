@@ -78,12 +78,12 @@ local function api_argv(cfg, ctx)
   return argv
 end
 
---- List MRs (query). scope: "mine" | "all"; query: optional search string.
+--- List pull requests (query). scope: "mine" | "all"; query: optional search string.
 ---@param cfg table
 ---@param ctx table
 ---@param opts table  -- { scope, query }
 ---@return lreview.MR[]|nil, string|nil
-function M.list_mrs(cfg, ctx, opts)
+function M.list_pull_requests(cfg, ctx, opts)
   opts = opts or {}
   local argv = base_argv(cfg, ctx)
   if opts.scope == "mine" then
@@ -112,7 +112,7 @@ function M.list_mrs(cfg, ctx, opts)
   if not data then
     return nil, err
   end
-  return mappers.gh_prs_to_mrs(data, ctx.repo), nil
+  return mappers.gh_prs_to_pull_requests(data, ctx.repo), nil
 end
 
 --- Get MR detail by ref (number, branch, or current branch if ref is nil).
@@ -172,11 +172,11 @@ function M.get_mr_by_branch(cfg, ctx, branch)
   if not data then
     return nil, err
   end
-  local mrs = mappers.gh_prs_to_mrs(data, ctx.repo)
-  if #mrs == 0 then
+  local prs = mappers.gh_prs_to_pull_requests(data, ctx.repo)
+  if #prs == 0 then
     return nil, "no pull request found for branch '" .. branch .. "'"
   end
-  return mrs[1], nil
+  return prs[1], nil
 end
 
 --- Fetch remote inline review comments for an MR.
@@ -290,6 +290,32 @@ function M.fetch_threads(cfg, ctx, number, mo_id)
   end
 
   return threads, nil
+end
+
+--- List repo collaborators (for @mention completion).
+--- Uses `gh api repos/{owner}/{repo}/collaborators --paginate`; gh follows
+--- pagination automatically, so this scales to large organizations.
+---@param cfg table
+---@param ctx table
+---@return table[]|nil, string|nil  -- { username, name, avatar_url }[]
+function M.list_users(cfg, ctx)
+  local argv = api_argv(cfg, ctx)
+  argv[#argv + 1] = "repos/{owner}/{repo}/collaborators"
+  argv[#argv + 1] = "--paginate"
+  local res = base.run(argv, { cwd = ctx.cwd })
+  local data, err = base.parse_json(res)
+  if not data then
+    return nil, err
+  end
+  local out = {}
+  for _, m in ipairs(data) do
+    out[#out + 1] = {
+      username = m.login,
+      name = m.name,
+      avatar_url = m.avatar_url,
+    }
+  end
+  return out, nil
 end
 
 --- Submit a batch of inline comments as a review (event=COMMENT).

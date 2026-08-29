@@ -43,7 +43,7 @@ end
 ---@param arr table[]
 ---@param repo string
 ---@return lreview.MR[]
-function M.gh_prs_to_mrs(arr, repo)
+function M.gh_prs_to_pull_requests(arr, repo)
   local out = {}
   for _, p in ipairs(arr or {}) do
     out[#out + 1] = M.gh_pr_to_mr(p, repo)
@@ -147,7 +147,7 @@ end
 ---@param arr table[]
 ---@param repo string
 ---@return lreview.MR[]
-function M.glab_mrs_to_mrs(arr, repo)
+function M.glab_merge_requests_to_pull_requests(arr, repo)
   local out = {}
   for _, m in ipairs(arr or {}) do
     out[#out + 1] = M.glab_mr_to_mr(m, repo)

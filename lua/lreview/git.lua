@@ -188,4 +188,21 @@ function M.default_branch(cwd)
   return nil
 end
 
+--- Create a new branch from the current HEAD and push it to origin.
+--- Used by LocalReviewCreate to open an MR/PR from a brand-new branch.
+---@param cwd string|nil
+---@param name string
+---@return boolean ok, string|nil err
+function M.create_branch(cwd, name)
+  local out, err = git({ "checkout", "-b", name }, cwd)
+  if not out then
+    return false, err
+  end
+  local out2, err2 = git({ "push", "-u", "origin", name }, cwd)
+  if not out2 then
+    return false, err2
+  end
+  return true, nil
+end
+
 return M

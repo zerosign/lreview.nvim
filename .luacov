@@ -1,0 +1,6 @@
+-- luacov configuration: scope coverage to the plugin source only.
+-- Patterns are Lua patterns matched against file paths (no .lua extension).
+return {
+  include = { "lua/lreview" },
+  exclude = { "tests", "scripts", "sandbox" },
+}

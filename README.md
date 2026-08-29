@@ -158,4 +158,22 @@ require("lreview").setup({
 
 ---
 
+## Development
+
+Tests, coverage, and benchmarks run through the sandbox Neovim (`scripts/sandbox-nvim.fish`) so they never touch your real `~/.config/nvim`. All recipes are defined in the `justfile`:
+
+```sh
+just test              # unit tests (offline, mock-based)
+just test-one test_git # run a single test by name
+just test-integration  # integration tests (hit live GitHub/GitLab APIs)
+just test-all          # unit + integration
+just coverage          # unit tests under luacov -> luacov.report.out
+just coverage-summary  # compact coverage summary
+just bench             # SQL query latency benchmark (1000 iterations)
+```
+
+Coverage is scoped to `lua/lreview/` via `.luacov`. The integration tests require authenticated `gh`/`glab` CLIs and the seeded sample repos in `tmp/`.
+
+---
+
 License: MIT

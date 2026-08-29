@@ -28,12 +28,12 @@ local function base_argv(cfg, ctx)
   return argv
 end
 
---- List MRs (query). scope: "mine" | "all"; query: optional search string.
+--- List pull requests (query). scope: "mine" | "all"; query: optional search string.
 ---@param cfg table
 ---@param ctx table
 ---@param opts table  -- { scope, query }
 ---@return lreview.MR[]|nil, string|nil
-function M.list_mrs(cfg, ctx, opts)
+function M.list_pull_requests(cfg, ctx, opts)
   opts = opts or {}
   local argv = base_argv(cfg, ctx)
   argv[#argv + 1] = "mr"
@@ -54,7 +54,7 @@ function M.list_mrs(cfg, ctx, opts)
   if not data then
     return nil, err
   end
-  return mappers.glab_mrs_to_mrs(data, ctx.repo), nil
+  return mappers.glab_merge_requests_to_pull_requests(data, ctx.repo), nil
 end
 
 --- Get MR detail by ref (iid, branch, or current branch if ref is nil).
@@ -114,11 +114,11 @@ function M.get_mr_by_branch(cfg, ctx, branch)
   if not data then
     return nil, err
   end
-  local mrs = mappers.glab_mrs_to_mrs(data, ctx.repo)
-  if #mrs == 0 then
+  local prs = mappers.glab_merge_requests_to_pull_requests(data, ctx.repo)
+  if #prs == 0 then
     return nil, "no merge request found for branch '" .. branch .. "'"
   end
-  return mrs[1], nil
+  return prs[1], nil
 end
 
 --- Fetch remote discussions (threads) for an MR via the stable glab api.
@@ -148,6 +148,33 @@ end
 ---@return lreview.Thread[]|nil, string|nil
 function M.fetch_threads(cfg, ctx, number, mo_id)
   return M.fetch_discussions(cfg, ctx, number)
+end
+
+--- List repo members (for @mention completion).
+--- Uses `glab api projects/:fullpath/members/all --paginate`; glab follows
+--- pagination automatically, so this scales to large organizations.
+---@param cfg table
+---@param ctx table
+---@return table[]|nil, string|nil  -- { username, name, avatar_url }[]
+function M.list_users(cfg, ctx)
+  local argv = base_argv(cfg, ctx)
+  argv[#argv + 1] = "api"
+  argv[#argv + 1] = "projects/:fullpath/members/all"
+  argv[#argv + 1] = "--paginate"
+  local res = base.run(argv, { cwd = ctx.cwd })
+  local data, err = base.parse_json(res)
+  if not data then
+    return nil, err
+  end
+  local out = {}
+  for _, m in ipairs(data) do
+    out[#out + 1] = {
+      username = m.username,
+      name = m.name,
+      avatar_url = m.avatar_url,
+    }
+  end
+  return out, nil
 end
 
 --- Submit a batch of inline comments as new discussion threads.

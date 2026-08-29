@@ -143,15 +143,14 @@ function M.migrate()
   for v = cur + 1, schema.version do
     local sql = schema.migrations[v]
     if sql then
-      -- Split migration scripts by semicolon and execute sequentially
-      for stmt in sql:gmatch("[^;]+") do
-        local trimmed = vim.trim(stmt)
-        if trimmed ~= "" then
-          local ok, err = M.db:eval(trimmed)
-          if not ok then
-            return false, "migration " .. v .. " failed on statement: " .. trimmed .. " | Error: " .. tostring(M.db:status().msg)
-          end
-        end
+      -- Use db:execute (sqlite3_exec) so multi-statement migrations work,
+      -- including triggers whose bodies contain semicolons. db:eval would
+      -- silently stop at the first statement (prepare_v2 only parses one).
+      local ok, err = pcall(function()
+        M.db:execute(sql)
+      end)
+      if not ok then
+        return false, "migration " .. v .. " failed | Error: " .. tostring(err)
       end
       M.db:eval("INSERT OR REPLACE INTO meta (k, v) VALUES ('schema_version', ?)", { tostring(v) })
     end

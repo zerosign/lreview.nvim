@@ -33,15 +33,15 @@ local ctx = { repo = "owner/repo", host = "github.com", cwd = "." }
 -- 1. Test GitHub Adapter Methods
 -- ============================================================================
 
--- Test list_mrs
+-- Test list_pull_requests
 next_response = {
   ok = true,
   code = 0,
   stdout = '[{"number":42,"title":"Mock PR","author":{"login":"zerosign"},"state":"OPEN","headRefName":"branch","baseRefName":"master"}]'
 }
-local mrs, err = github.list_mrs(cfg, ctx)
-if not mrs or #mrs ~= 1 or mrs[1].number ~= 42 then
-  print("FAIL: github.list_mrs parsing failed.")
+local prs, err = github.list_pull_requests(cfg, ctx)
+if not prs or #prs ~= 1 or prs[1].number ~= 42 then
+  print("FAIL: github.list_pull_requests parsing failed.")
   os.exit(1)
 end
 local has_pr, has_list = false, false
@@ -50,7 +50,7 @@ for _, arg in ipairs(last_command) do
   if arg == "list" then has_list = true end
 end
 if not has_pr or not has_list then
-  print("FAIL: github.list_mrs constructed incorrect command line: " .. table.concat(last_command, " "))
+  print("FAIL: github.list_pull_requests constructed incorrect command line: " .. table.concat(last_command, " "))
   os.exit(1)
 end
 
@@ -108,15 +108,15 @@ print("SUCCESS: GitHub adapter mocks verified.")
 -- ============================================================================
 local gl_cfg = { provider = "glab", adapter = "gitlab" }
 
--- Test list_mrs
+-- Test list_pull_requests
 next_response = {
   ok = true,
   code = 0,
   stdout = '[{"iid":12,"title":"Mock MR","author":{"username":"zerosign"},"state":"opened","source_branch":"branch","target_branch":"master"}]'
 }
-local mrs_gl, err = gitlab.list_mrs(gl_cfg, ctx)
-if not mrs_gl or #mrs_gl ~= 1 or mrs_gl[1].number ~= 12 then
-  print("FAIL: gitlab.list_mrs parsing failed.")
+local prs_gl, err = gitlab.list_pull_requests(gl_cfg, ctx)
+if not prs_gl or #prs_gl ~= 1 or prs_gl[1].number ~= 12 then
+  print("FAIL: gitlab.list_pull_requests parsing failed.")
   os.exit(1)
 end
 local has_mr, has_list = false, false
@@ -125,7 +125,7 @@ for _, arg in ipairs(last_command) do
   if arg == "list" then has_list = true end
 end
 if not has_mr or not has_list then
-  print("FAIL: gitlab.list_mrs constructed incorrect command line: " .. table.concat(last_command, " "))
+  print("FAIL: gitlab.list_pull_requests constructed incorrect command line: " .. table.concat(last_command, " "))
   os.exit(1)
 end
 

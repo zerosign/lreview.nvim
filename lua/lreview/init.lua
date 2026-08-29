@@ -29,19 +29,19 @@ local function cmd_query(args)
     return
   end
   local ctx = adapter.ctx(resolved)
-  local mrs, err = resolved.adapter.list_mrs(resolved.cfg, ctx, { scope = scope })
-  if not mrs then
+  local prs, err = resolved.adapter.list_pull_requests(resolved.cfg, ctx, { scope = scope })
+  if not prs then
     vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
     return
   end
   -- Cache into storage for offline use.
   local ok = storage.open()
   if ok then
-    for _, mr in ipairs(mrs) do
+    for _, mr in ipairs(prs) do
       require("lreview.storage.pull_request").upsert(mr)
     end
   end
-  vim.notify("lreview: " .. #mrs .. " MR(s) found", vim.log.levels.INFO)
+  vim.notify("lreview: " .. #prs .. " pull request(s) found", vim.log.levels.INFO)
 end
 
 local function resolve_detail_ref(cwd)
@@ -127,26 +127,9 @@ local function execute_create_mr(cwd, choice, title, target)
   vim.notify("lreview: created MR: " .. url, vim.log.levels.INFO)
 end
 
-local function cmd_create()
-  local cwd = vim.fn.getcwd()
-  local resolved = adapter.resolve(cwd)
-  if not resolved then
-    vim.notify("lreview: no git remote detected", vim.log.levels.WARN)
-    return
-  end
-  local ctx = adapter.ctx(resolved)
-  local templates, terr = resolved.adapter.list_templates(resolved.cfg, ctx)
-  if terr then
-    vim.notify("lreview: " .. tostring(terr), vim.log.levels.ERROR)
-    return
-  end
-
-  local target_choices = resolve_target_branches(cwd)
-  local choices = { { name = "(blank)", path = nil, content = "" } }
-  for _, t in ipairs(templates or {}) do
-    choices[#choices + 1] = t
-  end
-
+-- Template -> target branch -> title -> create. Shared by both the
+-- current-branch and new-branch create flows.
+local function pick_template_and_create(cwd, choices, target_choices)
   vim.ui.select(choices, {
     prompt = "Select MR/PR template:",
     format_item = function(c) return c.name end,
@@ -168,6 +151,62 @@ local function cmd_create()
       execute_create_mr(cwd, choice, title, target)
     end)
   end)
+end
+
+-- Source branch picker: use the current branch, or create a brand-new branch
+-- (checked out and pushed) and open the MR/PR from it.
+local function pick_source_branch(cwd, choices, target_choices)
+  local current = git.current_branch(cwd)
+  local source_choices = {}
+  if current then
+    source_choices[#source_choices + 1] = { name = "(current) " .. current, kind = "current" }
+  end
+  source_choices[#source_choices + 1] = { name = "(new) Create new branch...", kind = "new" }
+
+  vim.ui.select(source_choices, {
+    prompt = "Select source branch:",
+    format_item = function(c) return c.name end,
+  }, function(src)
+    if not src then
+      return
+    end
+    if src.kind == "new" then
+      local name = vim.fn.input("New branch name: ")
+      if name == "" then
+        return
+      end
+      local ok, err = git.create_branch(cwd, name)
+      if not ok then
+        vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+        return
+      end
+      vim.notify("lreview: created branch '" .. name .. "'", vim.log.levels.INFO)
+    end
+    pick_template_and_create(cwd, choices, target_choices)
+  end)
+end
+
+local function cmd_create()
+  local cwd = vim.fn.getcwd()
+  local resolved = adapter.resolve(cwd)
+  if not resolved then
+    vim.notify("lreview: no git remote detected", vim.log.levels.WARN)
+    return
+  end
+  local ctx = adapter.ctx(resolved)
+  local templates, terr = resolved.adapter.list_templates(resolved.cfg, ctx)
+  if terr then
+    vim.notify("lreview: " .. tostring(terr), vim.log.levels.ERROR)
+    return
+  end
+
+  local target_choices = resolve_target_branches(cwd)
+  local choices = { { name = "(blank)", path = nil, content = "" } }
+  for _, t in ipairs(templates or {}) do
+    choices[#choices + 1] = t
+  end
+
+  pick_source_branch(cwd, choices, target_choices)
 end
 
 local function cmd_comment()
@@ -204,6 +243,28 @@ local function cmd_pull()
       vim.notify("lreview: remote updates pulled successfully", vim.log.levels.INFO)
     else
       vim.notify("lreview: failed to pull remote updates", vim.log.levels.ERROR)
+    end
+  end)
+end
+
+local function cmd_pull_users()
+  vim.notify("lreview: fetching repo users...", vim.log.levels.INFO)
+  require("lreview.users").pull_users_async(function(success, count, err)
+    if success then
+      vim.notify("lreview: cached " .. count .. " repo user(s)", vim.log.levels.INFO)
+    else
+      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+    end
+  end)
+end
+
+local function cmd_pull_requests()
+  vim.notify("lreview: fetching pull request list...", vim.log.levels.INFO)
+  require("lreview.pull_request").pull_async(function(success, count, err)
+    if success then
+      vim.notify("lreview: cached " .. count .. " pull request(s)", vim.log.levels.INFO)
+    else
+      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
     end
   end)
 end
@@ -267,6 +328,8 @@ function M.register_commands()
   api.nvim_create_user_command("LocalReviewComment", cmd_comment, { range = true })
   api.nvim_create_user_command("LocalReviewSubmit", cmd_submit, {})
   api.nvim_create_user_command("LocalReviewPull", cmd_pull, {})
+  api.nvim_create_user_command("LocalReviewPullUser", cmd_pull_users, {})
+  api.nvim_create_user_command("LocalReviewPullRequest", cmd_pull_requests, {})
   api.nvim_create_user_command("LocalReviewClose", cmd_close, { nargs = "?" })
   api.nvim_create_user_command("LocalReviewApprove", cmd_approve, { nargs = "?" })
   api.nvim_create_user_command("LocalReviewToggle", cmd_toggle, {})
@@ -294,6 +357,10 @@ M.api = {
   approve_review = review.approve_review,
   resolve_thread = review.resolve_thread,
   resolve = adapter.resolve,
+  users = require("lreview.users"),
+  fetch_users = require("lreview.users").fetch_users,
+  pull_request = require("lreview.pull_request"),
+  fetch_pull_requests = require("lreview.pull_request").fetch,
 }
 
 return M

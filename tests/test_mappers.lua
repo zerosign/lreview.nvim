@@ -25,9 +25,9 @@ if mr.number ~= 42 or mr.provider ~= "github" or mr.repo ~= "owner/repo" or mr.s
 end
 
 -- Test list mapping
-local mrs = mappers.gh_prs_to_mrs({ mock_gh_pr }, "owner/repo")
-if #mrs ~= 1 or mrs[1].number ~= 42 then
-  print("FAIL: gh_prs_to_mrs failed.")
+local prs = mappers.gh_prs_to_pull_requests({ mock_gh_pr }, "owner/repo")
+if #prs ~= 1 or prs[1].number ~= 42 then
+  print("FAIL: gh_prs_to_pull_requests failed.")
   os.exit(1)
 end
 
@@ -122,9 +122,9 @@ if mr_gl.number ~= 12 or mr_gl.provider ~= "gitlab" or mr_gl.repo ~= "owner/repo
 end
 
 -- Test list mapping
-local mrs_gl = mappers.glab_mrs_to_mrs({ mock_glab_mr }, "owner/repo")
-if #mrs_gl ~= 1 or mrs_gl[1].number ~= 12 then
-  print("FAIL: glab_mrs_to_mrs failed.")
+local prs_gl = mappers.glab_merge_requests_to_pull_requests({ mock_glab_mr }, "owner/repo")
+if #prs_gl ~= 1 or prs_gl[1].number ~= 12 then
+  print("FAIL: glab_merge_requests_to_pull_requests failed.")
   os.exit(1)
 end
 

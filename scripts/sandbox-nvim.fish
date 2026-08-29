@@ -47,6 +47,13 @@ if test -d "$LUA_ROCKS"
   set -gx LUA_CPATH "$LUA_CPATH_EXTRA;;$LUA_CPATH"
 end
 
+# Also expose the user's system luarocks tree (luacov, etc.) so coverage runs
+# work without manual LUA_PATH setup. Only added when present.
+set -l SYS_LUA_ROCKS "$HOME/.luarocks/share/lua/5.1"
+if test -d "$SYS_LUA_ROCKS"
+  set -gx LUA_PATH "$SYS_LUA_ROCKS/?.lua;$SYS_LUA_ROCKS/?/init.lua;;$LUA_PATH"
+end
+
 exec "$NVIM_BIN" \
   --cmd "set runtimepath^=$PROJECT_ROOT" \
   --cmd "set runtimepath^=$PROJECT_ROOT/lua" \
