@@ -57,6 +57,28 @@ function M.open_quickfix()
   -- Set quickfix list and open window
   vim.fn.setqflist(qf_entries, "r")
   vim.cmd("copen")
+
+  -- Map buffer-local key 'e' in quickfix window to jump and open review split
+  local qf_buf = vim.api.nvim_get_current_buf()
+  vim.keymap.set("n", "e", function()
+    local qf_idx = vim.fn.line(".")
+    local qf_list = vim.fn.getqflist()
+    local entry = qf_list[qf_idx]
+    if entry then
+      vim.cmd("cc " .. qf_idx)
+      local line = vim.api.nvim_win_get_cursor(0)[1]
+      local abs = vim.fn.expand("%:p")
+      local root = git.root(vim.fn.getcwd())
+      local path = abs
+      if root then
+        if vim.startswith(abs, root .. "/") then
+          path = abs:sub(#root + 2)
+        end
+      end
+      require("lreview.ui.thread_view").show(vim.api.nvim_get_current_buf(), path, line)
+    end
+  end, { silent = true, buffer = qf_buf })
+
   vim.notify(string.format("lreview: loaded %d comment(s) into quickfix list", #qf_entries), vim.log.levels.INFO)
 end
 
