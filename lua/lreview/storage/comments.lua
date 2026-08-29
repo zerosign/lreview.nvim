@@ -17,9 +17,11 @@ local M = {}
 -- Thread States (Bit Flags)
 -- ---------------------------------------------------------------------------
 local THREAD_STATE = {
-  DRAFT    = 1, -- (0001) New local draft thread
-  SYNCED   = 2, -- (0010) Thread synced from remote server
-  RESOLVED = 4, -- (0100) Thread is resolved
+  DRAFT    = 1,  -- (00001) New local draft thread
+  SYNCED   = 2,  -- (00010) Thread synced from remote server
+  RESOLVED = 4,  -- (00100) Thread is resolved (combinable with SYNCED)
+  DELETED  = 8,  -- (01000) Thread deleted locally (future support)
+  CONFLICT = 16, -- (10000) Remote changed thread while local edits pending
 }
 M.THREAD_STATE = THREAD_STATE
 
@@ -27,12 +29,17 @@ M.THREAD_STATE = THREAD_STATE
 -- Comment States (Bit Flags)
 -- ---------------------------------------------------------------------------
 local STATE = {
-  DRAFT    = 1, -- (0001) New local reply
-  SYNCED   = 2, -- (0010) Clean comment matching remote
-  MODIFIED = 4, -- (0100) Synced comment edited locally
-  DELETED  = 8, -- (1000) Synced comment deleted locally
+  DRAFT    = 1,  -- (00001) New local reply, never pushed
+  SYNCED   = 2,  -- (00010) Matches current remote state
+  MODIFIED = 4,  -- (00100) Synced comment edited locally (not yet pushed)
+  DELETED  = 8,  -- (01000) Synced comment deleted locally (not yet pushed)
+  CONFLICT = 16, -- (10000) Remote changed while we had local edits pending
 }
 M.STATE = STATE
+
+-- Mask for all states that require a push (excludes SYNCED and CONFLICT).
+-- CONFLICT must be resolved by the user before pushing is allowed.
+M.PENDING_PUSH_MASK = STATE.DRAFT + STATE.MODIFIED + STATE.DELETED -- 13
 
 -- ---------------------------------------------------------------------------
 -- Decoders for Compatibility
@@ -46,8 +53,9 @@ local function decode_thread(row)
   end
   row.start_line = row.line_start
   row.end_line = row.line_end
-  row.is_draft = bit.band(row.state, THREAD_STATE.DRAFT) > 0 and 1 or 0
-  row.resolved = bit.band(row.state, THREAD_STATE.RESOLVED) > 0 and 1 or 0
+  row.is_draft   = bit.band(row.state, THREAD_STATE.DRAFT)    > 0 and 1 or 0
+  row.resolved   = bit.band(row.state, THREAD_STATE.RESOLVED) > 0 and 1 or 0
+  row.in_conflict = bit.band(row.state, THREAD_STATE.CONFLICT) > 0 and 1 or 0
   return row
 end
 
@@ -58,8 +66,9 @@ local function decode_comment(row)
   for k, v in pairs(payload) do
     row[k] = v
   end
-  row.dirty = (row.state == STATE.MODIFIED) and 1 or 0
-  row.deleted = (row.state == STATE.DELETED) and 1 or 0
+  row.dirty      = (row.state == STATE.MODIFIED) and 1 or 0
+  row.deleted    = (row.state == STATE.DELETED)  and 1 or 0
+  row.in_conflict = (row.state == STATE.CONFLICT) and 1 or 0
   return row
 end
 
@@ -215,6 +224,14 @@ function M.add_comment(c)
     body = c.body,
     created_at = c.created_at,
     in_reply_to = c.in_reply_to,
+    -- synced_body: the remote body at last successful sync.
+    -- This is our base for detecting whether the remote changed
+    -- independently of our local edits.
+    synced_body = (state_val == STATE.SYNCED) and c.body or c.synced_body,
+    -- Conflict metadata (only present when state == CONFLICT)
+    conflict_remote_body = c.conflict_remote_body,
+    conflict_reason = c.conflict_reason,
+    conflict_detected_at = c.conflict_detected_at,
   }
 
   storage.execute([[
@@ -326,6 +343,7 @@ function M.comments_for_buffer(mo_id, path)
 end
 
 --- Get all pending comments (drafts, modified, deleted) for an MR.
+--- Comments in CONFLICT state are excluded — they must be resolved first.
 ---@param mo_id string
 ---@return table[]
 function M.get_pending_comments(mo_id)
@@ -333,8 +351,8 @@ function M.get_pending_comments(mo_id)
     SELECT c.*, t.path, t.line_start, t.line_end, t.state as thread_state
     FROM comments c
     JOIN threads t ON c.t_id = t.t_id
-    WHERE t.mo_id = ? AND (c.state & 13) > 0
-  ]], mo_id)
+    WHERE t.mo_id = ? AND (c.state & ?) > 0
+  ]], mo_id, M.PENDING_PUSH_MASK)
   for i, r in ipairs(rows) do
     local decoded = decode_comment(r)
     decoded.start_line = r.line_start
@@ -343,6 +361,107 @@ function M.get_pending_comments(mo_id)
     rows[i] = decoded
   end
   return rows
+end
+
+--- Transition a comment to CONFLICT state, storing both local and remote bodies.
+---@param c_id string
+---@param remote_body string    -- what the remote has right now
+---@param reason string         -- "remote_edited" | "remote_deleted" | "thread_gone"
+function M.mark_comment_conflict(c_id, remote_body, reason)
+  local row = storage.query("SELECT * FROM comments WHERE c_id = ?", c_id)[1]
+  if not row then return end
+  local decoded = decode_comment(row)
+  decoded.state = STATE.CONFLICT
+  decoded.conflict_remote_body = remote_body
+  decoded.conflict_reason = reason
+  decoded.conflict_detected_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  -- decoded.body remains the LOCAL version
+  -- decoded.synced_body remains the base version
+  M.add_comment(decoded)
+end
+
+--- Transition a thread to CONFLICT state.
+---@param t_id string
+---@param reason string  -- "remote_deleted_has_drafts"
+function M.mark_thread_conflict(t_id, reason)
+  local t = M.get_thread(t_id)
+  if not t then return end
+  local new_state = bit.bor(t.state, THREAD_STATE.CONFLICT)
+  local payload = {
+    commit_sha = t.commit_sha,
+    last_synced_at = t.last_synced_at,
+    conflict_reason = reason,
+    conflict_detected_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+  }
+  storage.execute(
+    "UPDATE threads SET state = ?, payload = ? WHERE t_id = ?",
+    new_state, mpack.encode(payload), t_id
+  )
+end
+
+--- Resolve a CONFLICT comment by keeping the local version.
+--- Transitions back to MODIFIED so it will be pushed on next submit.
+---@param c_id string
+function M.resolve_conflict_keep_local(c_id)
+  local row = storage.query("SELECT * FROM comments WHERE c_id = ?", c_id)[1]
+  if not row then return end
+  local decoded = decode_comment(row)
+  if decoded.state ~= STATE.CONFLICT then return end
+  decoded.state = STATE.MODIFIED
+  decoded.conflict_remote_body = nil
+  decoded.conflict_reason = nil
+  decoded.conflict_detected_at = nil
+  M.add_comment(decoded)
+end
+
+--- Resolve a CONFLICT comment by accepting the remote version.
+--- Transitions to SYNCED with the remote body.
+---@param c_id string
+function M.resolve_conflict_accept_remote(c_id)
+  local row = storage.query("SELECT * FROM comments WHERE c_id = ?", c_id)[1]
+  if not row then return end
+  local decoded = decode_comment(row)
+  if decoded.state ~= STATE.CONFLICT then return end
+  -- Accept remote body as the new truth.
+  decoded.body = decoded.conflict_remote_body
+  decoded.state = STATE.SYNCED
+  decoded.conflict_remote_body = nil
+  decoded.conflict_reason = nil
+  decoded.conflict_detected_at = nil
+  M.add_comment(decoded)
+end
+
+--- Get all conflicting comments for an MR (for the conflict resolution UI).
+---@param mo_id string
+---@return table[]
+function M.get_conflicts(mo_id)
+  local rows = storage.query([[
+    SELECT c.*, t.path, t.line_start, t.line_end
+    FROM comments c
+    JOIN threads t ON c.t_id = t.t_id
+    WHERE t.mo_id = ? AND c.state = ?
+    ORDER BY t.line_start, c.c_id
+  ]], mo_id, STATE.CONFLICT)
+  for i, r in ipairs(rows) do
+    local decoded = decode_comment(r)
+    decoded.start_line = r.line_start
+    decoded.end_line = r.line_end
+    rows[i] = decoded
+  end
+  return rows
+end
+
+--- Count all conflicting comments for an MR.
+---@param mo_id string
+---@return integer
+function M.count_conflicts(mo_id)
+  local rows = storage.query([[
+    SELECT COUNT(*) as n
+    FROM comments c
+    JOIN threads t ON c.t_id = t.t_id
+    WHERE t.mo_id = ? AND c.state = ?
+  ]], mo_id, STATE.CONFLICT)
+  return (rows[1] and rows[1].n) or 0
 end
 
 return M

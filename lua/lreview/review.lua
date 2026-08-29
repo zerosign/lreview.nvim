@@ -237,6 +237,14 @@ function M.submit_review()
   -- Query pending comments via the storage layer
   local drafts = comments.get_pending_comments(detail.mo_id)
 
+  -- Block push if any unresolved conflicts exist.
+  local conflict_count = comments.count_conflicts(detail.mo_id)
+  if conflict_count > 0 then
+    return 0, string.format(
+      "%d conflict(s) must be resolved before pushing. Use :LocalReviewConflicts to review.",
+      conflict_count)
+  end
+
   if not drafts or #drafts == 0 then
     return 0, "no draft, edited, or deleted comments to submit"
   end
@@ -396,63 +404,189 @@ function M.sync_review()
     return 0, err
   end
 
+  local remote_t_ids = {}
   local remote_c_ids = {}
+  local now = os.date("!%Y-%m-%dT%H:%M:%SZ")
   local n = 0
+
   for _, t in ipairs(remote_threads) do
-    -- Upsert the thread as synced (is_draft=0). Remote threads use remote ids,
-    -- so they never collide with local draft uuids.
-    comments.create_thread({
-      t_id = t.t_id,
-      mo_id = detail.mo_id,
-      path = t.path,
-      commit_sha = t.commit_sha,
-      start_line = t.start_line,
-      end_line = t.end_line,
-      is_draft = false,
-      resolved = t.resolved == 1,
-      last_synced_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-    })
+    remote_t_ids[t.t_id] = true
+    local local_t = comments.get_thread(t.t_id)
+
+    if local_t == nil then
+      -- Brand new remote thread — insert as SYNCED.
+      comments.create_thread({
+        t_id = t.t_id, mo_id = detail.mo_id, path = t.path,
+        commit_sha = t.commit_sha, start_line = t.start_line,
+        end_line = t.end_line, is_draft = false,
+        resolved = t.resolved == 1, last_synced_at = now,
+      })
+    elseif local_t.is_draft == 1 then
+      -- Local DRAFT thread: never overwrite it with remote data.
+      -- (A draft and a remote thread can share the same file/line but
+      --  will have different t_ids, so this branch is rare but safe.)
+    else
+      -- Existing synced thread: update resolved bit and payload.
+      comments.create_thread({
+        t_id = t.t_id, mo_id = detail.mo_id, path = t.path,
+        commit_sha = t.commit_sha, start_line = t.start_line,
+        end_line = t.end_line, is_draft = false,
+        resolved = t.resolved == 1, last_synced_at = now,
+      })
+    end
+
+    -- Process comments inside this thread.
     for _, c in ipairs(t.comments or {}) do
       remote_c_ids[c.c_id] = true
 
-      -- Preserve local modified/deleted states during remote sync
-      local local_rows = comments.comments_for_thread(c.t_id)
+      -- Find our local copy by remote_id (c_id on remote == c_id in our DB
+      -- once synced; for first-time arrivals, look by remote_id field).
       local local_c
-      for _, lc in ipairs(local_rows) do
-        if lc.remote_id == c.remote_id then local_c = lc; break end
-      end
-      local body_val = c.body
-      local state_val = comments.STATE.SYNCED
-      if local_c and (local_c.state == comments.STATE.MODIFIED or local_c.state == comments.STATE.DELETED) then
-        body_val = local_c.body
-        state_val = local_c.state
+      local all_local = storage.query(
+        "SELECT * FROM comments WHERE t_id = ?", t.t_id)
+      for _, lc in ipairs(all_local) do
+        if lc.remote_id == c.remote_id or lc.c_id == c.c_id then
+          local_c = lc
+          break
+        end
       end
 
-      comments.add_comment({
-        c_id = c.c_id,
-        t_id = t.t_id,
-        remote_id = c.remote_id,
-        author = c.author,
-        body = body_val,
-        created_at = c.created_at,
-        in_reply_to = c.in_reply_to,
-        state = state_val,
-      })
+      if local_c then
+        -- Decode into Lua table (gets body, synced_body, state, etc.)
+        local lc = comments.comments_for_thread(t.t_id)
+        -- Re-find decoded version
+        local decoded_lc
+        for _, dc in ipairs(lc) do
+          if dc.c_id == (local_c.c_id) then decoded_lc = dc; break end
+        end
+        -- Also check DELETED state which is filtered out of comments_for_thread
+        if not decoded_lc then
+          -- Might be DELETED — fetch directly
+          local raw = storage.query("SELECT * FROM comments WHERE c_id = ?", local_c.c_id)
+          if raw[1] then
+            -- manually decode
+            local mpack_payload = raw[1].payload and vim.mpack.decode(raw[1].payload) or {}
+            decoded_lc = vim.tbl_extend("force", raw[1], mpack_payload)
+            decoded_lc.payload = nil
+          end
+        end
+
+        if decoded_lc then
+          local lstate = decoded_lc.state
+
+          if lstate == comments.STATE.DRAFT then
+            -- DRAFT: never overwrite.
+
+          elseif lstate == comments.STATE.SYNCED then
+            -- Clean local copy: remote is authoritative, update body + meta.
+            comments.add_comment({
+              c_id = c.c_id, t_id = t.t_id, remote_id = c.remote_id,
+              author = c.author, body = c.body,
+              created_at = c.created_at, in_reply_to = c.in_reply_to,
+              state = comments.STATE.SYNCED,
+            })
+
+          elseif lstate == comments.STATE.MODIFIED then
+            -- We have a pending local edit. Check if remote changed the base.
+            local synced_body = decoded_lc.synced_body
+            if c.body ~= synced_body then
+              -- Remote changed it too → CONFLICT.
+              comments.mark_comment_conflict(decoded_lc.c_id, c.body, "remote_edited")
+              vim.notify(
+                string.format("lreview: conflict on %s:%d — remote edited a comment you are editing",
+                  t.path, t.start_line or 0),
+                vim.log.levels.WARN)
+            end
+            -- else: remote base unchanged, keep MODIFIED — nothing to do.
+
+          elseif lstate == comments.STATE.DELETED then
+            -- We want to delete it; check if remote changed the base.
+            local synced_body = decoded_lc.synced_body
+            if c.body ~= synced_body then
+              -- Remote modified something we intend to delete → CONFLICT.
+              comments.mark_comment_conflict(decoded_lc.c_id, c.body, "remote_edited")
+              vim.notify(
+                string.format("lreview: conflict on %s:%d — remote edited a comment you deleted",
+                  t.path, t.start_line or 0),
+                vim.log.levels.WARN)
+            end
+            -- else: remote unchanged, keep DELETED state — push will do the delete.
+
+          elseif lstate == comments.STATE.CONFLICT then
+            -- Already in conflict — update the stored remote_body snapshot
+            -- in case a newer remote version arrived.
+            comments.mark_comment_conflict(decoded_lc.c_id, c.body, decoded_lc.conflict_reason or "remote_edited")
+          end
+        end
+      else
+        -- First time we see this comment: insert as SYNCED.
+        comments.add_comment({
+          c_id = c.c_id, t_id = t.t_id, remote_id = c.remote_id,
+          author = c.author, body = c.body,
+          created_at = c.created_at, in_reply_to = c.in_reply_to,
+          state = comments.STATE.SYNCED,
+        })
+      end
     end
     n = n + 1
   end
 
-  -- Detect and soft-delete local synced comments that were deleted on the remote
-  local existing_comments = storage.query([[
-    SELECT c.c_id, c.remote_id, c.state
+  -- ─── Handle remote-side deletions ───────────────────────────────────────
+  -- For every local comment that has a remote_id but is no longer in the
+  -- remote response: the remote deleted it.
+
+  local all_synced = storage.query([[
+    SELECT c.c_id, c.remote_id, c.state, c.payload, t.path, t.line_start
     FROM comments c
     JOIN threads t ON c.t_id = t.t_id
     WHERE t.mo_id = ? AND c.remote_id IS NOT NULL
   ]], detail.mo_id)
 
-  for _, ec in ipairs(existing_comments or {}) do
-    if not remote_c_ids[ec.remote_id] and ec.state ~= comments.STATE.DELETED then
-      comments.soft_delete_comment(ec.c_id)
+  for _, ec in ipairs(all_synced or {}) do
+    if not remote_c_ids[ec.remote_id] then
+      local payload = ec.payload and vim.mpack.decode(ec.payload) or {}
+      local lstate = ec.state
+
+      if lstate == comments.STATE.SYNCED then
+        -- Clean local copy deleted remotely → hard delete locally too.
+        comments.delete_comment(ec.c_id)
+
+      elseif lstate == comments.STATE.MODIFIED then
+        -- We had a pending edit but remote deleted it → CONFLICT.
+        comments.mark_comment_conflict(ec.c_id, "", "remote_deleted")
+        vim.notify(
+          string.format("lreview: conflict on %s:%d — remote deleted a comment you are editing",
+            ec.path or "?", ec.line_start or 0),
+          vim.log.levels.WARN)
+
+      elseif lstate == comments.STATE.DELETED then
+        -- Both sides want it gone: hard delete (agree).
+        comments.delete_comment(ec.c_id)
+        -- (No CONFLICT — both sides agree on deletion.)
+      end
+      -- DRAFT and CONFLICT states: leave them alone.
+    end
+  end
+
+  -- ─── Handle threads deleted on the remote ───────────────────────────────
+  local all_local_threads = comments.threads_for_mr(detail.mo_id)
+  for _, lt in ipairs(all_local_threads) do
+    if lt.is_draft == 0 and not remote_t_ids[lt.t_id] then
+      -- Remote deleted this thread. Check for orphaned local drafts.
+      local draft_children = storage.query([[
+        SELECT COUNT(*) as n FROM comments WHERE t_id = ? AND state = ?
+      ]], lt.t_id, comments.STATE.DRAFT)
+      local has_orphaned_drafts = (draft_children[1] and draft_children[1].n or 0) > 0
+
+      if has_orphaned_drafts then
+        comments.mark_thread_conflict(lt.t_id, "remote_deleted_has_drafts")
+        vim.notify(
+          string.format("lreview: conflict — thread on %s deleted remotely but you have unsent replies",
+            lt.path or "?"),
+          vim.log.levels.WARN)
+      else
+        comments.delete_thread(lt.t_id)
+      end
     end
   end
 
