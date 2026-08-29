@@ -75,3 +75,9 @@ sandbox/data/
 *.luac
 *.log
 session-ses_*.md
+
+# Infigraph code graph database and caches
+.infigraph/
+
+# Claude AI agent configuration folders
+.claude/
