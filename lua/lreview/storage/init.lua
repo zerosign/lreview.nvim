@@ -57,7 +57,10 @@ function M.open(db_path)
     M.close()
     return false, errm
   end
-  M.gc(30)
+  local db_cfg = config.get_defaults().db
+  if db_cfg.auto_housekeep then
+    M.gc(db_cfg.keep_days or 30)
+  end
   return true, nil
 end
 

@@ -32,6 +32,16 @@ Using |lazy.nvim|:
       opts = {
         defaults = {
           db_path = vim.fn.stdpath("data") .. "/lreview/lreview.db",
+          db = {
+            busy_timeout_ms = 5000,
+            keep_days = 30,
+            auto_housekeep = true,
+          },
+          ui = {
+            decor = "both",
+            float = { width = 0.5, height = 0.6 },
+          },
+          open = { method = "checkout" },
         },
         ["github\\.com"] = {
           adapter = "github",
@@ -48,7 +58,7 @@ Using |lazy.nvim|:
   })
 <
 
-==============================================================================
+=============================================================================
 CONFIGURATION                                        *lreview-configuration*
 
 The plugin is configured by passing an options table to `setup()`:
@@ -70,6 +80,10 @@ Inside the `defaults` block of your configuration:
   `db.keep_days`      (number)
                       Number of days to preserve closed/merged pull requests.
                       Default: `30`
+
+  `db.auto_housekeep` (boolean)
+                      Whether to auto-run SQLite database housekeeping on open.
+                      Default: `false`
 
   `ui.decor`          (string)
                       How inline comment indicators are rendered in buffers.
@@ -103,13 +117,51 @@ Keyed by a pattern (Lua matching) matching the remote repository domain (e.g.
 ==============================================================================
 USER COMMANDS                                             *lreview-commands*
 
-`:LocalReviewStart` [<branch-or-url>]
+`:LocalReviewQuery` [<scope>]
+                      Lists available MRs/PRs for the current repository.
+                      `scope` can be "mine" (default) or "all".
+
+`:LocalReviewDetail` [<ref>]
+                      Opens the markdown-formatted detail buffer editor for an
+                      MR/PR (defaults to the active review's MR, or checks the
+                      current branch). Supports direct saves (:w) to update titles
+                      and descriptions on the remote platform.
+
+`:LocalReviewStart`
                       Resolves the repository target MR, initializes database
                       schema connection, and triggers an asynchronous pull.
+
+`:LocalReviewCreate`
+                      Launches an interactive picker flow to select target branch
+                      and template, and inputs a title to create a remote MR/PR.
+
+`:LocalReviewComment`
+                      Adds a local draft comment on the current visually
+                      selected line range. Requires an active review.
+
+`:LocalReviewSubmit`
+                      Pushes all local draft inline comments as a unified review
+                      to the remote platform.
 
 `:LocalReviewPull`
                       Manually triggers an asynchronous remote pull to update
                       comments and threads for the active review.
+
+`:LocalReviewClose` [<number>]
+                      Closes the MR/PR on the remote platform. Defaults to
+                      the active review's MR.
+
+`:LocalReviewApprove` [<number>]
+                      Approves the MR/PR on the remote platform. Defaults to
+                      the active review's MR.
+
+`:LocalReviewToggle`
+                      Toggles inline annotations (signs & virtual text) on or off
+                      for the current buffer.
+
+`:LocalReviewHover`
+                      Displays the thread detail floating window for the active
+                      discussion thread under the cursor line.
 
 `:LocalReviewList`
                       Generates a Neovim Quickfix list containing all open
@@ -131,7 +183,9 @@ are active on the buffer:
 ==============================================================================
 GARBAGE COLLECTION                                              *lreview-gc*
 
-SQLite garbage collection runs automatically on database initialization. 
+SQLite garbage collection runs on database initialization when
+`db.auto_housekeep` is set to `true`.
+
 Any PR/MR marked `merged` or `closed` whose last update is older than the
 configured `db.keep_days` (default 30 days) is swept from SQLite.
 
