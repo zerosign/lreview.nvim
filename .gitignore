@@ -17,6 +17,10 @@ Sessionx.vim
 *~
 # Auto-generated tag files
 tags
+
+# Luacov code coverage output files
+luacov.stats.out
+luacov.report.out
 # Persistent undo
 [._]*.un~
 # git-ignore-end: vim
