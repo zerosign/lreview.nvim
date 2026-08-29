@@ -25,6 +25,9 @@ require("lazy").setup({
   {
     dir = root,
     name = "lreview",
+    dependencies = {
+      "kkharji/sqlite.lua",
+    },
     -- The same opts structure a user would pass in lazy.nvim.
     opts = {
       defaults = {

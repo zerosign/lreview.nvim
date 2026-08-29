@@ -1,6 +1,11 @@
 -- SQL Query Latency Benchmark for lreview.nvim
 -- Runs in headless Neovim to profile Read/Write/Update/Delete operations.
 
+-- Add sandbox lazy directories to path for sqlite.lua
+local config_dir = vim.fn.stdpath("config")
+local project_root = vim.fn.fnamemodify(config_dir, ":h:h")
+package.path = package.path .. ";" .. project_root .. "/data/nvim/lazy/sqlite.lua/lua/?.lua;" .. project_root .. "/data/nvim/lazy/sqlite.lua/lua/?/init.lua"
+
 local storage = require("lreview.storage")
 local comments = require("lreview.storage.comments")
 local pull_request = require("lreview.storage.pull_request")

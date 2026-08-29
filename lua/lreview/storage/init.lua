@@ -1,14 +1,17 @@
 ---@meta
 
--- Storage layer: SQLite (lsqlite3) connection + migrations.
+-- Storage layer: SQLite (sqlite.lua FFI wrapper) connection + migrations.
 
 local config = require("lreview.config")
 local schema = require("lreview.storage.schema")
 
 local M = {}
 
----@type table|nil  -- the open lsqlite3 db handle
+---@type table|nil  -- the sqlite.db instance
 M.db = nil
+
+local stmt_mod
+local clib
 
 --- Open (or create) the database and run migrations.
 ---@param db_path string|nil
@@ -17,10 +20,13 @@ function M.open(db_path)
   if M.db then
     return true, nil
   end
-  local ok, lsqlite3 = pcall(require, "lsqlite3")
+  local ok, sqlite = pcall(require, "sqlite")
   if not ok then
-    return false, "lsqlite3 not available: " .. tostring(lsqlite3)
+    return false, "sqlite.lua not available: " .. tostring(sqlite)
   end
+
+  stmt_mod = require("sqlite.stmt")
+  clib = require("sqlite.defs")
 
   db_path = db_path or config.get_defaults().db_path
   local dir = vim.fn.fnamemodify(db_path, ":h")
@@ -28,14 +34,22 @@ function M.open(db_path)
     vim.fn.mkdir(dir, "p")
   end
 
-  local db = lsqlite3.open(db_path)
+  -- We must find sqlite.lua dynamically for background sync jobs
+  local lazy_sqlite = vim.fn.stdpath("data") .. "/lazy/sqlite.lua/lua"
+  if vim.fn.isdirectory(lazy_sqlite) == 1 then
+    package.path = package.path .. ";" .. lazy_sqlite .. "/?.lua;" .. lazy_sqlite .. "/?/init.lua"
+  end
+
+  local db = sqlite.new(db_path, { keep_open = true })
   if not db then
     return false, "failed to open sqlite db: " .. db_path
   end
-  db:busy_timeout(config.get_defaults().db.busy_timeout_ms or 5000)
-  db:exec("PRAGMA journal_mode=WAL;")
-  db:exec("PRAGMA synchronous=NORMAL;")
-  db:exec("PRAGMA foreign_keys=ON;")
+
+  db:eval("PRAGMA journal_mode=WAL;")
+  db:eval("PRAGMA synchronous=NORMAL;")
+  db:eval("PRAGMA foreign_keys=ON;")
+  local timeout = config.get_defaults().db.busy_timeout_ms or 5000
+  db:eval("PRAGMA busy_timeout=" .. timeout .. ";")
 
   M.db = db
   local okm, errm = M.migrate()
@@ -48,6 +62,7 @@ function M.open(db_path)
 end
 
 --- Close the database.
+---@return nil
 function M.close()
   if M.db then
     M.db:close()
@@ -61,20 +76,21 @@ function M.current_version()
   if not M.db then
     return 0
   end
-  local stmt = M.db:prepare("SELECT v FROM meta WHERE k = 'schema_version'")
-  if not stmt then
+  local check = M.db:eval("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'")
+  if not check or type(check) ~= "table" or not (check[1] or check.name) then
     return 0
   end
-  local ok = stmt:step()
-  local v = 0
-  -- SQLITE_ROW (100) means a row was returned; SQLITE_DONE (101) means no row.
-  if ok == 100 then
-    v = tonumber(stmt:get_value(0)) or 0
+  local rows = M.db:eval("SELECT v FROM meta WHERE k = 'schema_version'")
+  if type(rows) == "table" and rows[1] then
+    return tonumber(rows[1].v) or 0
+  elseif type(rows) == "table" and rows.v then
+    return tonumber(rows.v) or 0
   end
-  stmt:finalize()
-  return v
+  return 0
 end
 
+--- Run schema migrations.
+---@return boolean ok, string|nil err
 function M.migrate()
   if not M.db then
     return false, "db not open"
@@ -89,13 +105,24 @@ function M.migrate()
       if f then
         local sql = f:read("*a")
         f:close()
-        local ok, err = M.db:exec(sql)
-        if ok ~= 0 then
-          return false, "failed to initialize base schema: " .. tostring(err)
+        -- Split by semicolon and execute statements sequentially
+        for stmt in sql:gmatch("[^;]+") do
+          local trimmed = vim.trim(stmt)
+          if trimmed ~= "" then
+            local ok, err = M.db:eval(trimmed)
+            if not ok then
+              return false, "failed to initialize base schema statement: " .. trimmed .. " | Error: " .. tostring(M.db:status().msg)
+            end
+          end
         end
         local cur_row = nil
-        for row in M.db:nrows("SELECT v FROM meta WHERE k = 'schema_version'") do
-          cur_row = row
+        local rows = M.db:eval("SELECT v FROM meta WHERE k = 'schema_version'")
+        if type(rows) == "table" then
+          if rows[1] then
+            cur_row = rows[1]
+          elseif rows.v then
+            cur_row = rows
+          end
         end
         if cur_row then
           cur = tonumber(cur_row.v) or 4
@@ -113,14 +140,39 @@ function M.migrate()
   for v = cur + 1, schema.version do
     local sql = schema.migrations[v]
     if sql then
-      local ok, err = M.db:exec(sql)
-      if ok ~= 0 then
-        return false, "migration " .. v .. " failed: " .. tostring(err)
+      -- Split migration scripts by semicolon and execute sequentially
+      for stmt in sql:gmatch("[^;]+") do
+        local trimmed = vim.trim(stmt)
+        if trimmed ~= "" then
+          local ok, err = M.db:eval(trimmed)
+          if not ok then
+            return false, "migration " .. v .. " failed on statement: " .. trimmed .. " | Error: " .. tostring(M.db:status().msg)
+          end
+        end
       end
-      M.db:exec("INSERT OR REPLACE INTO meta (k, v) VALUES ('schema_version', '" .. v .. "')")
+      M.db:eval("INSERT OR REPLACE INTO meta (k, v) VALUES ('schema_version', ?)", { tostring(v) })
     end
   end
   return true, nil
+end
+
+--- Safely bind parameters to statement bypasses buggy sqlite.lua binding loops.
+---@param pstmt any  -- sqlite_pstmt FFI pointer
+---@param i integer  -- 1-based bind parameter index
+---@param val any    -- bind value
+local function safe_bind(pstmt, i, val)
+  local t = type(val)
+  if t == "number" then
+    clib.bind_double(pstmt, i, val)
+  elseif t == "string" then
+    clib.bind_text(pstmt, i, val, #val, nil)
+  elseif t == "boolean" then
+    clib.bind_double(pstmt, i, val and 1 or 0)
+  elseif t == "nil" then
+    clib.bind_null(pstmt, i)
+  else
+    error("lreview: unsupported query parameter type: " .. t)
+  end
 end
 
 --- Execute a statement with params, returning rows.
@@ -131,22 +183,16 @@ function M.query(sql, ...)
   if not M.db then
     return {}
   end
-  local stmt = M.db:prepare(sql)
-  if not stmt then
-    return {}
-  end
-  -- select('#', ...) gives the true arg count even when params contain nil
-  -- values; a plain `#params` would stop at the first nil hole. Indexing
-  -- params[i] for i up to n returns nil for holes, which binds NULL.
+  local stmt = stmt_mod:parse(M.db.conn, sql)
   local n = select("#", ...)
   local params = { ... }
   for i = 1, n do
-    stmt:bind(i, params[i])
+    safe_bind(stmt.pstmt, i, params[i])
   end
   local rows = {}
-  for row in stmt:nrows() do
-    rows[#rows + 1] = row
-  end
+  stmt:each(function()
+    rows[#rows + 1] = stmt:kv()
+  end)
   stmt:finalize()
   return rows
 end
@@ -159,22 +205,28 @@ function M.execute(sql, ...)
   if not M.db then
     return nil
   end
-  local stmt = M.db:prepare(sql)
-  if not stmt then
-    return nil
-  end
+  local stmt = stmt_mod:parse(M.db.conn, sql)
   local n = select("#", ...)
   local params = { ... }
   for i = 1, n do
-    stmt:bind(i, params[i])
+    safe_bind(stmt.pstmt, i, params[i])
   end
-  local ok, err = stmt:step()
+  local code = stmt:step()
   stmt:finalize()
-  if ok ~= 0 and ok ~= 101 then
-    vim.notify("lreview: sqlite step error: " .. tostring(err), vim.log.levels.ERROR)
+  if code ~= clib.flags.row and code ~= clib.flags.done then
+    local err = M.db:status()
+    vim.notify("lreview: sqlite execute error (" .. err.code .. "): " .. tostring(err.msg), vim.log.levels.ERROR)
     return nil
   end
-  return M.db:last_insert_rowid()
+  local res = M.db:eval("SELECT last_insert_rowid() AS id")
+  if type(res) == "table" then
+    if res[1] then
+      return res[1].id
+    elseif res.id then
+      return res.id
+    end
+  end
+  return nil
 end
 
 --- Run garbage collection to clean up merged/closed PR comments older than X days.
