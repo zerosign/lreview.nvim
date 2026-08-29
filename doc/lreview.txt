@@ -229,6 +229,54 @@ Configure the custom adapter under `opts` using its Lua require module name:
 <
 
 ==============================================================================
+ADAPTER RETURN SHAPES                                 *lreview-adapter-shapes*
+
+Custom adapter methods must return Lua tables conforming to these models:
+
+`lreview.MR` (Returned by `query()`)
+  - `mo_id`           (string) Unique ID matching "<provider>:<repo>:<number>"
+  - `provider`        (string) Forge provider name (e.g. "gitea")
+  - `repo`            (string) Repository path, e.g. "owner/repo"
+  - `number`          (integer) Merge Request/Pull Request number
+  - `title`           (string) Title of the PR/MR
+  - `author`          (string) Username of the author
+  - `state`           (string) "open", "closed", or "merged"
+  - `source_branch`   (string) Source branch name
+  - `target_branch`   (string) Target branch name
+  - `url`             (string) Web URL of the PR/MR
+  - `updated_at`      (string) ISO-8601 timestamp string (e.g. "2026-08-29T12:00:00Z")
+
+`lreview.MRDetail` (Returned by `get_mr()`)
+  Extends `lreview.MR` with additional fields:
+  - `description`     (string|nil) Description body text
+  - `base_sha`        (string|nil) Base merge commit SHA
+  - `head_sha`        (string|nil) Head branch commit SHA
+  - `files`           (table|nil) Array of file tables. Each file has:
+    - `path`          (string) Repo-relative file path
+    - `additions`     (integer) Added lines count
+    - `deletions`     (integer) Deleted lines count
+    - `change_type`   (string) "MODIFIED", "ADDED", or "REMOVED"
+
+`lreview.Comment` (Returned inside `fetch_comments()`)
+  - `c_id`            (string) Unique comment ID (matches remote_id on sync)
+  - `remote_id`       (string) ID from remote platform
+  - `author`          (string) Comment author username
+  - `body`            (string) Markdown text of the comment
+  - `created_at`      (string) ISO-8601 timestamp string
+  - `in_reply_to`     (string|nil) Parent remote comment or discussion ID
+
+`lreview.Thread` (Returned inside `fetch_comments()`)
+  - `t_id`            (string) Platform thread/discussion ID
+  - `mo_id`           (string) PR/MR unique ID
+  - `path`            (string) Repo-relative file path
+  - `commit_sha`      (string|nil) Diff commit SHA
+  - `start_line`      (integer) Gutter start line (1-indexed)
+  - `end_line`        (integer) Gutter end line (1-indexed)
+  - `is_draft`        (boolean) True if thread has local drafts
+  - `comments`        (table) Array of `lreview.Comment` tables
+
+
+==============================================================================
 GARBAGE COLLECTION                                              *lreview-gc*
 
 SQLite garbage collection runs on database initialization when
