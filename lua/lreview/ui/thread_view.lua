@@ -4,7 +4,7 @@ local review = require("lreview.review")
 
 local M = {}
 
--- Store active view state: { bufnr = bufnr, winid = winid, line_map = { [line] = c_id }, mo_id = mo_id, path = path, thread_id = thread_id }
+-- Store active view state: { bufnr, winid, line_map, thread_line_map, mo_id, path, line }
 M.state = nil
 
 --- Close the active thread view if open.
@@ -17,51 +17,62 @@ function M.close()
   end
 end
 
---- Render thread comments into a markdown string and construct line map.
----@param thread_id string
----@return string[] lines, table line_map
-local function format_thread(thread_id)
-  local ts = comments.comments_for_thread(thread_id)
+--- Render thread comments into a markdown string and construct line maps.
+---@param mo_id integer
+---@param rel_path string
+---@param line integer
+---@return string[] lines, table line_map, table thread_line_map
+local function format_threads_for_line(mo_id, rel_path, line)
+  local threads = comments.threads_for_buffer(mo_id, rel_path, line)
   local lines = {}
   local line_map = {}
+  local thread_line_map = {}
 
-  local t = comments.get_thread(thread_id)
-  local function add_line(text, c_id)
+  local function add_line(text, c_id, t_id)
     lines[#lines + 1] = text
     if c_id then
       line_map[#lines] = c_id
     end
+    if t_id then
+      thread_line_map[#lines] = t_id
+    end
   end
 
-  if t and comments.thread_is_resolved(t.state) then
-    add_line("✔ RESOLVED THREAD")
-    add_line("=================")
-    add_line("")
-  end
-
-  for i, c in ipairs(ts) do
-    local is_draft = not c.remote_id or c.remote_id == ""
-    local author = c.author or "me"
-    local status = ""
-    if is_draft then
-      status = " (Draft)"
-    end
-    local time_str = c.created_at or ""
-
-    -- Format header:  author • time • status
-    local header = " " .. author .. "  •  " .. time_str .. "  " .. status
-    add_line(header, c.c_id)
-    add_line(string.rep("─", vim.fn.strdisplaywidth(header)), c.c_id)
-
-    -- Format body (split by lines)
-    local body = c.body
-    for part in body:gmatch("[^\r\n]+") do
-      add_line(part, c.c_id)
-    end
-
-    -- Spacer between comments
-    if i < #ts then
+  for idx, t in ipairs(threads) do
+    if idx > 1 then
       add_line("")
+      add_line("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+      add_line("")
+    end
+
+    local ts = comments.comments_for_thread(t.t_id)
+    local resolved_tag = comments.thread_is_resolved(t.state) and " [✔ RESOLVED]" or " [● ACTIVE]"
+    
+    add_line(string.format("💬 THREAD #%d%s", idx, resolved_tag), nil, t.t_id)
+    add_line("===========================================================", nil, t.t_id)
+    add_line("", nil, t.t_id)
+
+    for i, c in ipairs(ts) do
+      local is_draft = not c.remote_id or c.remote_id == ""
+      local author = c.author or "me"
+      local status = is_draft and " (Draft)" or ""
+      local time_str = c.created_at or ""
+
+      -- Format header:  author • time • status
+      local header = " " .. author .. "  •  " .. time_str .. "  " .. status
+      add_line(header, c.c_id, t.t_id)
+      add_line(string.rep("─", vim.fn.strdisplaywidth(header)), c.c_id, t.t_id)
+
+      -- Format body (split by lines)
+      local body = c.body
+      for part in body:gmatch("[^\r\n]+") do
+        add_line(part, c.c_id, t.t_id)
+      end
+
+      -- Spacer between comments in the same thread
+      if i < #ts then
+        add_line("", nil, t.t_id)
+      end
     end
   end
 
@@ -69,10 +80,9 @@ local function format_thread(thread_id)
   add_line("")
   add_line("───────────────────────────────────────────────────────────")
   add_line(" [r] Reply  |  [e] Edit Draft  |  [d] Delete Draft  |  [q] Close")
-  local toggle_resolve_help = (t and comments.thread_is_resolved(t.state)) and " [s] Reopen Thread" or " [s] Resolve Thread"
-  add_line(toggle_resolve_help)
+  add_line(" [s] Toggle Thread Resolve State  |  [P] Submit Review")
 
-  return lines, line_map
+  return lines, line_map, thread_line_map
 end
 
 --- Draw/redraw the current thread view buffer.
@@ -80,8 +90,9 @@ function M.redraw()
   if not M.state or not vim.api.nvim_buf_is_valid(M.state.bufnr) then
     return
   end
-  local lines, line_map = format_thread(M.state.thread_id)
+  local lines, line_map, thread_line_map = format_threads_for_line(M.state.mo_id, M.state.path, M.state.line)
   M.state.line_map = line_map
+  M.state.thread_line_map = thread_line_map
 
   -- Temporarily set modifiable to update buffer contents
   vim.bo[M.state.bufnr].modifiable = true
@@ -90,22 +101,46 @@ function M.redraw()
 end
 
 --- Resolve key actions (reply, edit, delete) in the current thread view.
----@param action "reply"|"edit"|"delete"
+---@param action "reply"|"edit"|"delete"|"resolve"|"submit"
 local function handle_action(action)
   if not M.state then
     return
   end
   local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
   local c_id = M.state.line_map[cursor_line]
+  local t_id = M.state.thread_line_map[cursor_line]
+
+  -- If cursor is on a non-comment line, search upwards then downwards to find closest thread ID
+  if not t_id then
+    for i = cursor_line, 1, -1 do
+      if M.state.thread_line_map[i] then
+        t_id = M.state.thread_line_map[i]
+        break
+      end
+    end
+  end
+  if not t_id then
+    for i = cursor_line, #M.state.thread_line_map do
+      if M.state.thread_line_map[i] then
+        t_id = M.state.thread_line_map[i]
+        break
+      end
+    end
+  end
+
+  if not t_id then
+    vim.notify("lreview: move cursor into a thread block to perform action", vim.log.levels.WARN)
+    return
+  end
 
   if action == "reply" then
-    require("lreview.ui.editor").open_reply(M.state.thread_id)
+    require("lreview.ui.editor").open_reply(t_id)
   elseif action == "edit" then
     if not c_id then
       vim.notify("lreview: move cursor onto a comment to edit it", vim.log.levels.WARN)
       return
     end
-    local ts = comments.comments_for_thread(M.state.thread_id)
+    local ts = comments.comments_for_thread(t_id)
     local target_comment
     for _, c in ipairs(ts) do
       if c.c_id == c_id then
@@ -120,7 +155,7 @@ local function handle_action(action)
       vim.notify("lreview: move cursor onto a comment to delete it", vim.log.levels.WARN)
       return
     end
-    local ts = comments.comments_for_thread(M.state.thread_id)
+    local ts = comments.comments_for_thread(t_id)
     local target_comment
     for _, c in ipairs(ts) do
       if c.c_id == c_id then
@@ -139,27 +174,34 @@ local function handle_action(action)
       vim.notify("lreview: draft deleted", vim.log.levels.INFO)
     end
 
-    -- If no active comments left in thread, close thread view (only delete thread row if it is a draft)
-    local remaining = comments.comments_for_thread(M.state.thread_id)
+    -- If no active comments left in thread, close or delete
+    local remaining = comments.comments_for_thread(t_id)
     if #remaining == 0 then
-      local t = comments.get_thread(M.state.thread_id)
+      local t = comments.get_thread(t_id)
       if t and comments.thread_is_draft(t.state) then
-        comments.delete_thread(M.state.thread_id)
+        comments.delete_thread(t_id)
       end
-      M.close()
-      vim.notify("lreview: thread closed", vim.log.levels.INFO)
+      -- If there are other threads on the line, just redraw instead of closing the whole window
+      local all_threads = comments.threads_for_buffer(M.state.mo_id, M.state.path, M.state.line)
+      if #all_threads == 0 then
+        M.close()
+        vim.notify("lreview: thread closed", vim.log.levels.INFO)
+      else
+        M.redraw()
+      end
     else
       M.redraw()
     end
+
     local bufnr = vim.fn.bufnr(M.state.path)
     if bufnr ~= -1 then
       require("lreview.ui.decor").refresh(bufnr)
     end
   elseif action == "resolve" then
-    local t = comments.get_thread(M.state.thread_id)
+    local t = comments.get_thread(t_id)
     if t then
       local new_val = not comments.thread_is_resolved(t.state)
-      local ok, err = review.resolve_thread(M.state.thread_id, new_val)
+      local ok, err = review.resolve_thread(t_id, new_val)
       if not ok then
         vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
         return
@@ -203,10 +245,9 @@ function M.show(bufnr, rel_path, line)
     M.close()
     return
   end
-  local t = threads[1]
 
-  -- If already viewing this thread, focus it (if already visible), redraw, and return.
-  if M.state and M.state.thread_id == t.t_id and vim.api.nvim_buf_is_valid(M.state.bufnr) then
+  -- If already viewing this line, focus it (if already visible), redraw, and return.
+  if M.state and M.state.path == rel_path and M.state.line == line and vim.api.nvim_buf_is_valid(M.state.bufnr) then
     if M.state.winid and vim.api.nvim_win_is_valid(M.state.winid) then
       vim.api.nvim_set_current_win(M.state.winid)
     end
@@ -241,9 +282,10 @@ function M.show(bufnr, rel_path, line)
     bufnr = buf,
     winid = nil,
     line_map = {},
+    thread_line_map = {},
     mo_id = mo_id,
     path = rel_path,
-    thread_id = t.t_id,
+    line = line,
   }
 
   M.redraw()

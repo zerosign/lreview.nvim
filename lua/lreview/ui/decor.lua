@@ -89,33 +89,67 @@ function M.refresh(bufnr)
     table.insert(threads[c.t_id].comments, c)
   end
 
+  -- Group threads by line number to avoid duplicate side-by-side extmarks
+  local line_threads = {}
+  local line_order = {}
   for _, t_id in ipairs(thread_order) do
     local t = threads[t_id]
-    local cs = t.comments
-    local is_draft = t.is_draft
-    local is_resolved = t.resolved
-    local sign_hl = is_resolved and "Comment" or (is_draft and "LReviewSignDraft" or "LReviewSignSynced")
-    local text_hl = is_resolved and "Comment" or (is_draft and "LReviewVirtTextDraft" or "LReviewVirtTextSynced")
-    local num_hl = is_resolved and "LReviewNumResolved" or (is_draft and "LReviewNumDraft" or "LReviewNumSynced")
-    local sign_text = is_resolved and "✔" or (is_draft and "💬" or "●")
+    local l = t.start_line
+    if not line_threads[l] then
+      line_threads[l] = {}
+      table.insert(line_order, l)
+    end
+    table.insert(line_threads[l], t)
+  end
 
+  for _, l in ipairs(line_order) do
+    local ts = line_threads[l]
+    local total_comments = 0
     local draft_count = 0
-    for _, c in ipairs(cs) do
-      if not c.remote_id or c.remote_id == "" then
-        draft_count = draft_count + 1
+    local any_active = false
+    local any_draft = false
+    local all_resolved = true
+
+    for _, t in ipairs(ts) do
+      total_comments = total_comments + #t.comments
+      local is_resolved = t.resolved
+      local is_draft = t.is_draft
+      if not is_resolved then
+        all_resolved = false
+      end
+      if is_draft then
+        any_draft = true
+      else
+        any_active = true
+      end
+      for _, c in ipairs(t.comments) do
+        if not c.remote_id or c.remote_id == "" then
+          draft_count = draft_count + 1
+        end
       end
     end
 
-    local virt_text_str = "   " .. #cs .. " comment(s)"
+    local sign_hl = all_resolved and "Comment" or (any_draft and "LReviewSignDraft" or "LReviewSignSynced")
+    local text_hl = all_resolved and "Comment" or (any_draft and "LReviewVirtTextDraft" or "LReviewVirtTextSynced")
+    local num_hl = all_resolved and "LReviewNumResolved" or (any_draft and "LReviewNumDraft" or "LReviewNumSynced")
+    local sign_text = all_resolved and "✔" or (any_draft and "💬" or "●")
+
+    local virt_text_str = ""
+    if #ts > 1 then
+      virt_text_str = string.format("   %d threads (%d comments)", #ts, total_comments)
+    else
+      virt_text_str = string.format("   %d comment(s)", total_comments)
+    end
+
     if draft_count > 0 then
       virt_text_str = virt_text_str .. " (" .. draft_count .. " draft)"
     end
-    if is_resolved then
+    if all_resolved then
       virt_text_str = virt_text_str .. " (Resolved)"
     end
 
     -- Extmarks are 0-indexed for lines.
-    local line_idx = t.start_line - 1
+    local line_idx = l - 1
     pcall(vim.api.nvim_buf_set_extmark, bufnr, ns, line_idx, 0, {
       sign_text = sign_text,
       sign_hl_group = sign_hl,
