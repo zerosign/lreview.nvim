@@ -72,7 +72,8 @@ function M.parse_remote_url(url)
   if url == "" then
     return nil
   end
-  -- strip trailing .git
+  -- strip trailing slashes and .git
+  url = url:gsub("/+$", "")
   url = url:gsub("%.git$", "")
 
   local domain, path
@@ -170,7 +171,12 @@ function M.default_branch(cwd)
       return b
     end
   end
-  -- Fall back to a known default.
+  -- If current branch is a known default, return it
+  local current = M.current_branch(cwd)
+  if current == "main" or current == "master" then
+    return current
+  end
+  -- Fall back to a known default in remote branches
   local branches = M.remote_branches(cwd)
   for _, b in ipairs({ "main", "master" }) do
     for _, rb in ipairs(branches) do
