@@ -98,9 +98,9 @@ function M.refresh(bufnr)
       end
     end
 
-    local virt_text_str = string.format("   %d comment(s)", #cs)
+    local virt_text_str = "   " .. #cs .. " comment(s)"
     if draft_count > 0 then
-      virt_text_str = virt_text_str .. string.format(" (%d draft)", draft_count)
+      virt_text_str = virt_text_str .. " (" .. draft_count .. " draft)"
     end
     if is_resolved then
       virt_text_str = virt_text_str .. " (Resolved)"

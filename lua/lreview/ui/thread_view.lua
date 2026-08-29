@@ -51,7 +51,7 @@ local function format_thread(thread_id)
     local time_str = c.created_at or ""
 
     -- Format header:  author • time • status
-    local header = string.format(" %s  •  %s  %s", author, time_str, status)
+    local header = " " .. author .. "  •  " .. time_str .. "  " .. status
     add_line(header, c.c_id)
     add_line(string.rep("─", vim.fn.strdisplaywidth(header)), c.c_id)
 
