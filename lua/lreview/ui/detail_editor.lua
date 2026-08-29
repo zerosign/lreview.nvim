@@ -13,8 +13,8 @@ local function parse_buffer(bufnr)
 
   for _, line in ipairs(lines) do
     if not in_desc then
-      local t = line:match("^# Title:%s*(.*)") or line:match("^#%s*(.*)")
-      if t and t ~= "" then
+      local t = line:match("^# Title:%s*(.*)") or line:match("^#%s+([^#].*)")
+      if t and t ~= "" and title == "No Title" then
         title = t
       end
       if line:match("^## Description%s*") or line:match("^## Description:%s*") then
@@ -66,8 +66,15 @@ function M.open(detail)
     "- **Status:** " .. detail.state,
     "",
     "## Description",
-    detail.body or "",
   }
+
+  if detail.body and detail.body ~= "" then
+    for line in (detail.body .. "\n"):gmatch("(.-)\r?\n") do
+      lines[#lines + 1] = line
+    end
+  else
+    lines[#lines + 1] = ""
+  end
 
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
   vim.bo[bufnr].modified = false
@@ -94,9 +101,11 @@ function M.open(detail)
     end,
   })
 
-  -- Split open the buffer
-  vim.cmd("split")
-  vim.api.nvim_win_set_buf(0, bufnr)
+  -- Split open the buffer (safely handles headless environments)
+  local ok_split = pcall(vim.cmd, "split")
+  if ok_split then
+    pcall(vim.api.nvim_win_set_buf, 0, bufnr)
+  end
 end
 
 return M
