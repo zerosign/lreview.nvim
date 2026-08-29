@@ -1,4 +1,4 @@
--- SQLite base schema for lreview.nvim (Version 3)
+-- SQLite base schema for lreview.nvim
 
 CREATE TABLE IF NOT EXISTS pull_requests (
   mo_id         TEXT PRIMARY KEY,   -- "<provider>:<repo>:<number>"
@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS comments (
   created_at  TEXT,
   in_reply_to TEXT,
   deleted     INTEGER NOT NULL DEFAULT 0,
+  dirty       INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY(t_id) REFERENCES threads(t_id)
 );
 
@@ -59,10 +60,53 @@ CREATE TABLE IF NOT EXISTS reviews (
   FOREIGN KEY(mo_id) REFERENCES pull_requests(mo_id)
 );
 
+CREATE TABLE IF NOT EXISTS repo_users (
+  repo_key   TEXT NOT NULL,
+  username   TEXT NOT NULL,
+  name       TEXT,
+  avatar_url TEXT,
+  fetched_at TEXT,
+  PRIMARY KEY (repo_key, username)
+);
+
+-- FTS5 trigram indexes for substring search over repo users and MRs.
+CREATE VIRTUAL TABLE IF NOT EXISTS repo_users_fts USING fts5(
+  username, name,
+  content='repo_users',
+  content_rowid='rowid',
+  tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS repo_users_ai AFTER INSERT ON repo_users BEGIN
+  INSERT INTO repo_users_fts(rowid, username, name) VALUES (new.rowid, new.username, new.name);
+END;
+CREATE TRIGGER IF NOT EXISTS repo_users_ad AFTER DELETE ON repo_users BEGIN
+  INSERT INTO repo_users_fts(repo_users_fts, rowid, username, name) VALUES ('delete', old.rowid, old.username, old.name);
+END;
+CREATE TRIGGER IF NOT EXISTS repo_users_au AFTER UPDATE ON repo_users BEGIN
+  INSERT INTO repo_users_fts(repo_users_fts, rowid, username, name) VALUES ('delete', old.rowid, old.username, old.name);
+  INSERT INTO repo_users_fts(rowid, username, name) VALUES (new.rowid, new.username, new.name);
+END;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS pull_requests_fts USING fts5(
+  number, title,
+  content='pull_requests',
+  content_rowid='rowid',
+  tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS pull_requests_ai AFTER INSERT ON pull_requests BEGIN
+  INSERT INTO pull_requests_fts(rowid, number, title) VALUES (new.rowid, new.number, new.title);
+END;
+CREATE TRIGGER IF NOT EXISTS pull_requests_ad AFTER DELETE ON pull_requests BEGIN
+  INSERT INTO pull_requests_fts(pull_requests_fts, rowid, number, title) VALUES ('delete', old.rowid, old.number, old.title);
+END;
+CREATE TRIGGER IF NOT EXISTS pull_requests_au AFTER UPDATE ON pull_requests BEGIN
+  INSERT INTO pull_requests_fts(pull_requests_fts, rowid, number, title) VALUES ('delete', old.rowid, old.number, old.title);
+  INSERT INTO pull_requests_fts(rowid, number, title) VALUES (new.rowid, new.number, new.title);
+END;
+
 CREATE TABLE IF NOT EXISTS meta (
   k TEXT PRIMARY KEY,
   v TEXT
 );
-
--- Seed the initial schema version
-INSERT OR REPLACE INTO meta (k, v) VALUES ('schema_version', '4');

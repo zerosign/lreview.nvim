@@ -75,6 +75,8 @@ vim.ui.input = function(opts, on_confirm)
   on_confirm("Mock Entered Title")
 end
 
+vim.fn.confirm = function() return 1 end
+
 -- ============================================================================
 -- 2. Test Review Orchestration Operations (review.lua)
 -- ============================================================================

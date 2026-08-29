@@ -99,9 +99,9 @@ end
 ---@param c lreview.Comment
 function M.add_comment(c)
   storage.execute([[
-    INSERT OR REPLACE INTO comments (c_id, t_id, remote_id, author, body, created_at, in_reply_to, deleted)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  ]], c.c_id, c.t_id, c.remote_id, c.author, c.body, c.created_at, c.in_reply_to, c.deleted and 1 or 0)
+    INSERT OR REPLACE INTO comments (c_id, t_id, remote_id, author, body, created_at, in_reply_to, deleted, dirty)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ]], c.c_id, c.t_id, c.remote_id, c.author, c.body, c.created_at, c.in_reply_to, c.deleted and 1 or 0, c.dirty and 1 or 0)
 end
 
 --- Get comments for a thread.
@@ -116,6 +116,20 @@ end
 ---@param body string
 function M.update_comment(c_id, body)
   storage.execute("UPDATE comments SET body = ? WHERE c_id = ?", body, c_id)
+end
+
+--- Update a comment body and dirty status.
+---@param c_id string
+---@param body string
+---@param dirty integer
+function M.update_comment_body_and_dirty(c_id, body, dirty)
+  storage.execute("UPDATE comments SET body = ?, dirty = ? WHERE c_id = ?", body, dirty or 0, c_id)
+end
+
+--- Mark a comment as clean (dirty = 0).
+---@param c_id string
+function M.mark_clean(c_id)
+  storage.execute("UPDATE comments SET dirty = 0 WHERE c_id = ?", c_id)
 end
 
 --- Delete a comment.

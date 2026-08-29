@@ -222,7 +222,7 @@ function M.open_edit(c_id, current_body)
     local submit_immediately = config.get_defaults().submit_immediately
     local c = storage.query("SELECT * FROM comments WHERE c_id = ?", c_id)[1]
     local is_synced = c and c.remote_id and c.remote_id ~= ""
-    if submit_immediately or is_synced then
+    if submit_immediately then
       if is_synced then
         vim.notify("lreview: updating synced comment remote-side...", vim.log.levels.INFO)
       else
@@ -234,7 +234,11 @@ function M.open_edit(c_id, current_body)
         return
       end
     else
-      comments.update_comment(c_id, text)
+      if is_synced then
+        comments.update_comment_body_and_dirty(c_id, text, 1)
+      else
+        comments.update_comment(c_id, text)
+      end
     end
 
     -- Refresh Thread View

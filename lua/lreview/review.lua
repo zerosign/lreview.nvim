@@ -234,23 +234,31 @@ function M.submit_review()
   end
   local ctx = adapter.ctx(resolved, detail.number)
 
-  -- Query all comments that are drafts (remote_id IS NULL)
+  -- Query drafts (remote_id IS NULL) AND dirty edits (dirty = 1)
   local drafts = storage.query([[
-    SELECT c.c_id, c.t_id, c.body, c.in_reply_to, t.path, t.start_line, t.end_line, t.is_draft as thread_is_draft
+    SELECT c.c_id, c.t_id, c.body, c.remote_id, c.dirty, c.in_reply_to, t.path, t.start_line, t.end_line, t.is_draft as thread_is_draft
     FROM comments c
     JOIN threads t ON c.t_id = t.t_id
-    WHERE t.mo_id = ? AND c.remote_id IS NULL
+    WHERE t.mo_id = ? AND (c.remote_id IS NULL OR c.dirty = 1)
   ]], detail.mo_id)
 
   if not drafts or #drafts == 0 then
-    return 0, "no draft comments to submit"
+    return 0, "no draft or edited comments to submit"
   end
 
   local new_threads_batch = {}
   local replies = {}
+  local edits = {}
 
   for _, d in ipairs(drafts) do
-    if d.thread_is_draft == 1 then
+    if d.remote_id and d.remote_id ~= "" and d.dirty == 1 then
+      edits[#edits + 1] = {
+        t_id = d.t_id,
+        c_id = d.c_id,
+        remote_id = d.remote_id,
+        body = d.body,
+      }
+    elseif d.thread_is_draft == 1 then
       new_threads_batch[#new_threads_batch + 1] = {
         path = d.path,
         line = d.start_line,
@@ -273,6 +281,29 @@ function M.submit_review()
         reply_to_id = reply_to_id,
       }
     end
+  end
+
+  -- Format confirmation summary
+  local summary = { "Pending Review Changes:" }
+  for _, nt in ipairs(new_threads_batch) do
+    local snippet = nt.body:gsub("\n", " "):sub(1, 45)
+    summary[#summary + 1] = string.format("  [New Thread]  %s:%d: %s", nt.path, nt.line, snippet)
+  end
+  for _, r in ipairs(replies) do
+    local snippet = r.body:gsub("\n", " "):sub(1, 45)
+    summary[#summary + 1] = string.format("  [New Reply]   %s", snippet)
+  end
+  for _, e in ipairs(edits) do
+    local snippet = e.body:gsub("\n", " "):sub(1, 45)
+    summary[#summary + 1] = string.format("  [Edit Note]   %s", snippet)
+  end
+
+  local total_pending = #new_threads_batch + #replies + #edits
+  local msg = table.concat(summary, "\n") .. string.format("\n\nPush these %d change(s) to %s?", total_pending, resolved.provider)
+  local choice = vim.fn.confirm(msg, "&Yes\n&No", 2)
+  if choice ~= 1 then
+    vim.notify("lreview: push cancelled", vim.log.levels.INFO)
+    return 0, nil
   end
 
   local count = 0
@@ -299,6 +330,17 @@ function M.submit_review()
     end
     -- Clear local draft reply on success
     comments.delete_comment(r.c_id)
+    count = count + 1
+  end
+
+  -- 3. Submit edits individually
+  for _, e in ipairs(edits) do
+    local ok, err = resolved.adapter.update_comment(resolved.cfg, ctx, detail.number, e.t_id, e.remote_id, e.body)
+    if not ok then
+      return count, err
+    end
+    -- Mark comment clean on success
+    comments.mark_clean(e.c_id)
     count = count + 1
   end
 
@@ -354,15 +396,26 @@ function M.sync_review()
     })
     for _, c in ipairs(t.comments or {}) do
       remote_c_ids[c.c_id] = true
+
+      -- Preserve local dirty edits during remote sync
+      local local_c = storage.query("SELECT dirty, body FROM comments WHERE remote_id = ?", c.remote_id)[1]
+      local body_val = c.body
+      local dirty_val = false
+      if local_c and local_c.dirty == 1 then
+        body_val = local_c.body
+        dirty_val = true
+      end
+
       comments.add_comment({
         c_id = c.c_id,
         t_id = t.t_id,
         remote_id = c.remote_id,
         author = c.author,
-        body = c.body,
+        body = body_val,
         created_at = c.created_at,
         in_reply_to = c.in_reply_to,
         deleted = false,
+        dirty = dirty_val,
       })
     end
     n = n + 1

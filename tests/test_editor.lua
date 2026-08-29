@@ -98,6 +98,8 @@ vim.fn.complete = function(startcol, matches)
   last_complete = { startcol = startcol, matches = matches }
 end
 
+vim.fn.confirm = function() return 1 end
+
 -- Track window closing
 local closed_wins = {}
 local original_win_close = vim.api.nvim_win_close

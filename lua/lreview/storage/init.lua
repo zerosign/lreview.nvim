@@ -92,14 +92,29 @@ function M.current_version()
   return 0
 end
 
---- Run schema migrations.
+--- Run schema migrations (clean slate drop and recreate on version mismatch).
 ---@return boolean ok, string|nil err
 function M.migrate()
   if not M.db then
     return false, "db not open"
   end
   local cur = M.current_version()
-  if cur == 0 then
+  if cur ~= schema.version then
+    -- Drop all tables/triggers if any exist to ensure a clean slate
+    local tables = {
+      "comments", "threads", "pull_requests", "reviews", "repo_users",
+      "repo_users_fts", "pull_requests_fts", "meta"
+    }
+    for _, tbl in ipairs(tables) do
+      pcall(function() M.db:execute("DROP TABLE IF EXISTS " .. tbl) end)
+    end
+    pcall(function() M.db:execute("DROP TRIGGER IF EXISTS repo_users_ai") end)
+    pcall(function() M.db:execute("DROP TRIGGER IF EXISTS repo_users_ad") end)
+    pcall(function() M.db:execute("DROP TRIGGER IF EXISTS repo_users_au") end)
+    pcall(function() M.db:execute("DROP TRIGGER IF EXISTS pull_requests_ai") end)
+    pcall(function() M.db:execute("DROP TRIGGER IF EXISTS pull_requests_ad") end)
+    pcall(function() M.db:execute("DROP TRIGGER IF EXISTS pull_requests_au") end)
+
     -- Load base schema from schema.sql located in the same directory.
     local source = debug.getinfo(1).source:match("@(.*)$")
     if source then
@@ -108,51 +123,20 @@ function M.migrate()
       if f then
         local sql = f:read("*a")
         f:close()
-        -- Split by semicolon and execute statements sequentially
-        for stmt in sql:gmatch("[^;]+") do
-          local trimmed = vim.trim(stmt)
-          if trimmed ~= "" then
-            local ok, err = M.db:eval(trimmed)
-            if not ok then
-              return false, "failed to initialize base schema statement: " .. trimmed .. " | Error: " .. tostring(M.db:status().msg)
-            end
-          end
+
+        -- Run baseline schema using db:execute (sqlite3_exec) to support multi-statements/triggers
+        local ok, err = pcall(function()
+          M.db:execute(sql)
+        end)
+        if not ok then
+          return false, "failed to initialize base schema: " .. tostring(err)
         end
-        local cur_row = nil
-        local rows = M.db:eval("SELECT v FROM meta WHERE k = 'schema_version'")
-        if type(rows) == "table" then
-          if rows[1] then
-            cur_row = rows[1]
-          elseif rows.v then
-            cur_row = rows
-          end
-        end
-        if cur_row then
-          cur = tonumber(cur_row.v) or 4
-        else
-          cur = 4
-        end
+        M.db:eval("INSERT OR REPLACE INTO meta (k, v) VALUES ('schema_version', ?)", { tostring(schema.version) })
       else
         return false, "could not find schema.sql at " .. sql_file
       end
     else
       return false, "could not determine source path for schema.sql"
-    end
-  end
-
-  for v = cur + 1, schema.version do
-    local sql = schema.migrations[v]
-    if sql then
-      -- Use db:execute (sqlite3_exec) so multi-statement migrations work,
-      -- including triggers whose bodies contain semicolons. db:eval would
-      -- silently stop at the first statement (prepare_v2 only parses one).
-      local ok, err = pcall(function()
-        M.db:execute(sql)
-      end)
-      if not ok then
-        return false, "migration " .. v .. " failed | Error: " .. tostring(err)
-      end
-      M.db:eval("INSERT OR REPLACE INTO meta (k, v) VALUES ('schema_version', ?)", { tostring(v) })
     end
   end
   return true, nil
