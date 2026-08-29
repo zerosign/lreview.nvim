@@ -15,6 +15,26 @@ function M.setup(opts)
   config.setup(opts)
   storage.open()
   M.register_commands()
+
+  -- Automatically start review and enable highlights on buffer open
+  local grp = vim.api.nvim_create_augroup("lreview_auto", { clear = true })
+  vim.api.nvim_create_autocmd({ "BufReadPost", "BufNewFile" }, {
+    group = grp,
+    callback = function(ev)
+      local bufnr = ev.buf
+      if vim.bo[bufnr].buftype ~= "" then return end
+      local root = git.root(vim.fn.getcwd())
+      if not root then return end
+
+      vim.schedule(function()
+        if not vim.api.nvim_buf_is_valid(bufnr) then return end
+        local detail = review.start_review()
+        if detail then
+          require("lreview.ui.decor").enable(bufnr)
+        end
+      end)
+    end
+  })
 end
 
 -- ---------------------------------------------------------------------------
@@ -342,7 +362,7 @@ function M.register_commands()
   })
 
   api.nvim_create_user_command("LocalReviewDetail", cmd_detail, { nargs = "?" })
-  api.nvim_create_user_command("LocalReviewStart", cmd_start, {})
+  api.nvim_create_user_command("LocalReviewStart", cmd_toggle, {})
   api.nvim_create_user_command("LocalReviewCreate", cmd_create, {})
   api.nvim_create_user_command("LocalReviewComment", cmd_comment, { range = true })
   api.nvim_create_user_command("LocalReviewSubmit", cmd_submit, {})
