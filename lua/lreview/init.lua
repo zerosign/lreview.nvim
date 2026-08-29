@@ -310,7 +310,7 @@ local function cmd_toggle()
   require("lreview.ui.decor").toggle()
 end
 
-local function cmd_hover()
+local function cmd_open()
   if not ensure_review_started() then return end
   local line = vim.api.nvim_win_get_cursor(0)[1]
   local abs = vim.fn.expand("%:p")
@@ -352,7 +352,8 @@ function M.register_commands()
   api.nvim_create_user_command("LocalReviewClose", cmd_close, { nargs = "?" })
   api.nvim_create_user_command("LocalReviewApprove", cmd_approve, { nargs = "?" })
   api.nvim_create_user_command("LocalReviewToggle", cmd_toggle, {})
-  api.nvim_create_user_command("LocalReviewHover", cmd_hover, {})
+  api.nvim_create_user_command("LocalReviewHover", cmd_open, {})
+  api.nvim_create_user_command("LocalReviewOpen", cmd_open, {})
   api.nvim_create_user_command("LocalReviewList", cmd_list, {})
 end
 

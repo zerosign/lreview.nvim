@@ -251,43 +251,20 @@ function M.show(bufnr, rel_path, line)
 
   -- Retrieve layout configuration
   local ui_cfg = config.get_defaults().ui or {}
-  local layout = ui_cfg.layout or "float"
+  local layout = ui_cfg.layout or "split"
+  if layout == "float" then
+    layout = "split"
+  end
   local winid
 
-  if layout == "float" then
-    local border = ui_cfg.float and ui_cfg.float.border or "rounded"
-    local max_w = math.floor(vim.o.columns * (ui_cfg.float and ui_cfg.float.width or 0.5))
-    local max_h = math.floor(vim.o.lines * (ui_cfg.float and ui_cfg.float.height or 0.6))
-
-    -- Simple size estimation based on formatted content
-    local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-    local w = 20
-    for _, l in ipairs(lines) do
-      w = math.max(w, vim.fn.strdisplaywidth(l))
-    end
-    w = math.min(w + 2, max_w)
-    local h = math.min(#lines + 1, max_h)
-
-    winid = vim.api.nvim_open_win(buf, false, {
-      relative = "cursor",
-      row = 1,
-      col = 0,
-      width = w,
-      height = h,
-      border = border,
-      style = "minimal",
-    })
-  elseif layout == "split" or layout == "vsplit" then
+  if layout == "split" or layout == "vsplit" then
     local split_pos = ui_cfg.split and ui_cfg.split.position or "botright"
     local split_size = ui_cfg.split and ui_cfg.split.size or 15
     local split_cmd = (layout == "vsplit") and "vnew" or "new"
 
-    -- Remember current window to preserve focus
-    local prev_win = vim.api.nvim_get_current_win()
     vim.cmd(string.format("silent %s %d%s", split_pos, split_size, split_cmd))
     winid = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_buf(winid, buf)
-    vim.api.nvim_set_current_win(prev_win)
   else
     -- Full buffer layout: open in current window
     winid = vim.api.nvim_get_current_win()

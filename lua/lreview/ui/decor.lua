@@ -134,41 +134,7 @@ function M.toggle(bufnr)
     M.enabled_buffers[bufnr] = true
     M.refresh(bufnr)
 
-    -- Auto-hover when cursor moves or pauses on a line with review comments (smooth 200ms debounce)
-    local hover_timer = vim.loop.new_timer()
-    vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
-      buffer = bufnr,
-      callback = function()
-        hover_timer:stop()
-        hover_timer:start(200, 0, vim.schedule_wrap(function()
-          if not vim.api.nvim_buf_is_valid(bufnr) then return end
-          local cur_win = vim.api.nvim_get_current_win()
-          -- Don't trigger if focus moved out of the code window (e.g. into the review thread view)
-          local code_win = vim.fn.bufwinid(bufnr)
-          if code_win == -1 or cur_win ~= code_win then return end
 
-          local line = vim.api.nvim_win_get_cursor(code_win)[1]
-          local abs = vim.api.nvim_buf_get_name(bufnr)
-          local root = git.root(vim.fn.getcwd())
-          local path = abs
-          if root and vim.startswith(abs, root .. "/") then
-            path = abs:sub(#root + 2)
-          end
-          if review.current then
-            local threads = comments.threads_for_buffer(review.current.detail.mo_id, path, line)
-            if #threads > 0 then
-              require("lreview.ui.thread_view").show(bufnr, path, line)
-            else
-              local tv = require("lreview.ui.thread_view")
-              if tv.state and tv.state.winid and tv.state.winid ~= cur_win then
-                tv.close()
-              end
-            end
-          end
-        end))
-      end,
-      group = vim.api.nvim_create_augroup(grp_name, { clear = true }),
-    })
 
     vim.notify("lreview: review highlights enabled", vim.log.levels.INFO)
   end
