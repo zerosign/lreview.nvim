@@ -84,7 +84,13 @@ function M.start_review(cwd)
     detail = detail,
     cwd = cwd,
   }
-  M.pull_review_async()
+  -- Auto-pull remote updates only in interactive sessions. The headless pull
+  -- job sets vim.g.lreview_pull_job before calling start_review, which would
+  -- otherwise spawn an unbounded chain of nested pull jobs (each job spawning
+  -- another) and pile up orphaned nvim processes contending on the SQLite DB.
+  if not vim.g.lreview_pull_job then
+    M.pull_review_async()
+  end
   return detail, nil
 end
 
@@ -423,7 +429,7 @@ function M.pull_review_async(callback)
     "--cmd",
     "set runtimepath^=" .. vim.fn.escape(plugin_root, " "),
     "-c",
-    string.format("lua require('lreview').api.start_review(%q)", current_cwd),
+    string.format("lua vim.g.lreview_pull_job = true; require('lreview').api.start_review(%q)", current_cwd),
     "-c",
     "lua require('lreview').api.sync_review()",
     "-c",
