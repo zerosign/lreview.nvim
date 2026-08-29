@@ -1,6 +1,8 @@
 local comments = require("lreview.storage.comments")
 local review = require("lreview.review")
 local decor = require("lreview.ui.decor")
+local config = require("lreview.config")
+local storage = require("lreview.storage")
 
 local M = {}
 
@@ -37,20 +39,33 @@ local function create_scratchpad(initial_text, save_callback)
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   end
 
-  -- Set up floating editor window centered in the screen
-  local w = math.floor(vim.o.columns * 0.6)
-  local h = math.floor(vim.o.lines * 0.5)
-  local row = math.floor((vim.o.lines - h) / 2)
-  local col = math.floor((vim.o.columns - w) / 2)
+  -- Set up editor window based on layout preference
+  local ui_cfg = config.get_defaults().ui or {}
+  local layout = ui_cfg.layout or "float"
+  local win
 
-  local win = vim.api.nvim_open_win(buf, true, {
-    relative = "editor",
-    row = row,
-    col = col,
-    width = w,
-    height = h,
-    border = "rounded",
-  })
+  if layout == "split" or layout == "vsplit" then
+    local split_pos = ui_cfg.split and ui_cfg.split.position or "botright"
+    local split_size = ui_cfg.split and ui_cfg.split.size or 10
+    local split_cmd = (layout == "vsplit") and "vnew" or "new"
+    vim.cmd(string.format("silent %s %d%s", split_pos, split_size, split_cmd))
+    win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(win, buf)
+  else
+    -- Float (default)
+    local w = math.floor(vim.o.columns * 0.6)
+    local h = math.floor(vim.o.lines * 0.5)
+    local row = math.floor((vim.o.lines - h) / 2)
+    local col = math.floor((vim.o.columns - w) / 2)
+    win = vim.api.nvim_open_win(buf, true, {
+      relative = "editor",
+      row = row,
+      col = col,
+      width = w,
+      height = h,
+      border = "rounded",
+    })
+  end
 
   -- Intercept write commands (:w, :wq)
   vim.api.nvim_create_autocmd("BufWriteCmd", {
@@ -72,7 +87,6 @@ local function create_scratchpad(initial_text, save_callback)
   local opts = { silent = true, noremap = true, buffer = buf }
   vim.keymap.set("i", "<C-cr>", "<cmd>w<cr>", opts)
   vim.keymap.set("n", "<leader>s", "<cmd>w<cr>", opts)
-  vim.keymap.set("n", "q", "<cmd>q<cr>", opts)
 
   -- Completion in the scratchpad:
   --   @mention  -> cached repo users (see :LocalReviewPullUser)
@@ -166,16 +180,26 @@ end
 ---@param thread_id string
 function M.open_reply(thread_id)
   create_scratchpad(nil, function(text)
-    local reply = {
-      c_id = uuid(),
-      t_id = thread_id,
-      remote_id = nil,
-      author = nil,
-      body = text,
-      created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-      in_reply_to = nil, -- Will be filled during remote submit if needed
-    }
-    comments.add_comment(reply)
+    local submit_immediately = config.get_defaults().submit_immediately
+    if submit_immediately then
+      vim.notify("lreview: submitting reply immediately...", vim.log.levels.INFO)
+      local remote_id, err = review.push_reply_immediately(thread_id, text)
+      if not remote_id then
+        vim.notify("lreview: failed to push reply: " .. tostring(err), vim.log.levels.ERROR)
+        return
+      end
+    else
+      local reply = {
+        c_id = uuid(),
+        t_id = thread_id,
+        remote_id = nil,
+        author = nil,
+        body = text,
+        created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        in_reply_to = nil,
+      }
+      comments.add_comment(reply)
+    end
     
     -- Refresh Thread View and Code buffer decor
     local thread_view = require("lreview.ui.thread_view")
@@ -195,7 +219,18 @@ end
 ---@param current_body string
 function M.open_edit(c_id, current_body)
   create_scratchpad(current_body, function(text)
-    comments.update_comment(c_id, text)
+    local submit_immediately = config.get_defaults().submit_immediately
+    local c = storage.query("SELECT * FROM comments WHERE c_id = ?", c_id)[1]
+    if submit_immediately and c and c.remote_id then
+      vim.notify("lreview: updating comment immediately...", vim.log.levels.INFO)
+      local ok, err = review.push_edit_immediately(c_id, text)
+      if not ok then
+        vim.notify("lreview: failed to update comment: " .. tostring(err), vim.log.levels.ERROR)
+        return
+      end
+    else
+      comments.update_comment(c_id, text)
+    end
 
     -- Refresh Thread View
     local thread_view = require("lreview.ui.thread_view")
@@ -222,29 +257,39 @@ function M.open_new_comment(path, start_line, end_line)
   local mo_id = review.current.detail.mo_id
 
   create_scratchpad(nil, function(text)
-    local t_id = uuid()
-    local thread = {
-      t_id = t_id,
-      mo_id = mo_id,
-      path = path,
-      commit_sha = review.current.detail.head_sha,
-      start_line = start_line,
-      end_line = end_line,
-      is_draft = true,
-      last_synced_at = nil,
-    }
-    comments.create_thread(thread)
+    local submit_immediately = config.get_defaults().submit_immediately
+    if submit_immediately then
+      vim.notify("lreview: submitting comment immediately...", vim.log.levels.INFO)
+      local ok, err = review.push_thread_immediately(path, start_line, end_line, text)
+      if not ok then
+        vim.notify("lreview: failed to push comment: " .. tostring(err), vim.log.levels.ERROR)
+        return
+      end
+    else
+      local t_id = uuid()
+      local thread = {
+        t_id = t_id,
+        mo_id = mo_id,
+        path = path,
+        commit_sha = review.current.detail.head_sha,
+        start_line = start_line,
+        end_line = end_line,
+        is_draft = true,
+        last_synced_at = nil,
+      }
+      comments.create_thread(thread)
 
-    local c = {
-      c_id = uuid(),
-      t_id = t_id,
-      remote_id = nil,
-      author = nil,
-      body = text,
-      created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-      in_reply_to = nil,
-    }
-    comments.add_comment(c)
+      local c = {
+        c_id = uuid(),
+        t_id = t_id,
+        remote_id = nil,
+        author = nil,
+        body = text,
+        created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        in_reply_to = nil,
+      }
+      comments.add_comment(c)
+    end
 
     -- Refresh active buffer highlights
     local bufnr = vim.fn.bufnr(path)

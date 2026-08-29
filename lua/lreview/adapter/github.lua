@@ -227,6 +227,7 @@ function M.fetch_threads(cfg, ctx, number, mo_id)
               comments(first: 100) {
                 nodes {
                   id
+                  databaseId
                   body
                   createdAt
                   author {
@@ -276,9 +277,9 @@ function M.fetch_threads(cfg, ctx, number, mo_id)
       }
       for _, c_node in ipairs(comments_nodes) do
         t.comments[#t.comments + 1] = {
-          c_id = c_node.id,
+          c_id = tostring(c_node.databaseId or c_node.id),
           t_id = node.id,
-          remote_id = c_node.id,
+          remote_id = tostring(c_node.databaseId or c_node.id),
           author = c_node.author and c_node.author.login or "ghost",
           body = c_node.body,
           created_at = c_node.createdAt,
@@ -346,6 +347,55 @@ function M.submit_inline_review(cfg, ctx, number, comments, body)
     argv[#argv + 1] = "-F"
     argv[#argv + 1] = string.format("comments[][body]=%s", c.body)
   end
+  local res = base.run(argv, { cwd = ctx.cwd })
+  if not res.ok then
+    return false, res.error
+  end
+  return true, nil
+end
+
+--- Submit a reply to an existing thread.
+---@param cfg table
+---@param ctx table
+---@param number integer
+---@param reply_to_id string  -- comment databaseId/node ID (parent comment)
+---@param body string
+---@return string|nil, string|nil  -- remote_comment_id, error
+function M.submit_reply(cfg, ctx, number, reply_to_id, body)
+  local argv = api_argv(cfg, ctx)
+  argv[#argv + 1] = string.format("repos/{owner}/{repo}/pulls/%d/comments", number)
+  argv[#argv + 1] = "-X"
+  argv[#argv + 1] = "POST"
+  argv[#argv + 1] = "-f"
+  argv[#argv + 1] = "body=" .. body
+  argv[#argv + 1] = "-f"
+  argv[#argv + 1] = "in_reply_to=" .. reply_to_id
+  local res = base.run(argv, { cwd = ctx.cwd })
+  if not res.ok then
+    return nil, res.error
+  end
+  local data, err = base.parse_json(res)
+  if not data then
+    return nil, err
+  end
+  return tostring(data.databaseId or data.id), nil
+end
+
+--- Update/edit a comment.
+---@param cfg table
+---@param ctx table
+---@param number integer
+---@param thread_id string
+---@param comment_id string
+---@param body string
+---@return boolean, string|nil
+function M.update_comment(cfg, ctx, number, thread_id, comment_id, body)
+  local argv = api_argv(cfg, ctx)
+  argv[#argv + 1] = string.format("repos/{owner}/{repo}/pulls/comments/%s", comment_id)
+  argv[#argv + 1] = "-X"
+  argv[#argv + 1] = "PATCH"
+  argv[#argv + 1] = "-f"
+  argv[#argv + 1] = "body=" .. body
   local res = base.run(argv, { cwd = ctx.cwd })
   if not res.ok then
     return false, res.error

@@ -172,6 +172,19 @@ local function handle_action(action)
         require("lreview.ui.decor").refresh(bufnr)
       end
     end
+  elseif action == "submit" then
+    vim.notify("lreview: submitting review...", vim.log.levels.INFO)
+    local count, err = review.submit_review()
+    if err then
+      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+    else
+      vim.notify(string.format("lreview: successfully submitted %d comment(s)", count), vim.log.levels.INFO)
+      M.redraw()
+      local bufnr = vim.fn.bufnr(M.state.path)
+      if bufnr ~= -1 then
+        require("lreview.ui.decor").refresh(bufnr)
+      end
+    end
   end
 end
 
@@ -193,8 +206,11 @@ function M.show(bufnr, rel_path, line)
   end
   local t = threads[1]
 
-  -- If already viewing this thread, just ensure window is open and redraw.
+  -- If already viewing this thread, focus it (if already visible), redraw, and return.
   if M.state and M.state.thread_id == t.t_id and vim.api.nvim_buf_is_valid(M.state.bufnr) then
+    if M.state.winid and vim.api.nvim_win_is_valid(M.state.winid) then
+      vim.api.nvim_set_current_win(M.state.winid)
+    end
     M.redraw()
     return
   end
@@ -218,6 +234,7 @@ function M.show(bufnr, rel_path, line)
     vim.keymap.set("n", "e", function() handle_action("edit") end, opts)
     vim.keymap.set("n", "d", function() handle_action("delete") end, opts)
     vim.keymap.set("n", "s", function() handle_action("resolve") end, opts)
+    vim.keymap.set("n", "P", function() handle_action("submit") end, opts)
   end
 
   -- Save initial state

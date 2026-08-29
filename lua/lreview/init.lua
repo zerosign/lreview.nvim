@@ -209,7 +209,19 @@ local function cmd_create()
   pick_source_branch(cwd, choices, target_choices)
 end
 
+local function ensure_review_started()
+  if not review.current then
+    local detail, err = review.start_review()
+    if not detail then
+      vim.notify("lreview: failed to start review session: " .. tostring(err), vim.log.levels.ERROR)
+      return false
+    end
+  end
+  return true
+end
+
 local function cmd_comment()
+  if not ensure_review_started() then return end
   local start_line = vim.fn.line("'<")
   local end_line = vim.fn.line("'>")
   if start_line == 0 or end_line == 0 then
@@ -228,6 +240,7 @@ local function cmd_comment()
 end
 
 local function cmd_submit()
+  if not ensure_review_started() then return end
   local pushed, err = review.submit_review()
   if err then
     vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
@@ -237,6 +250,7 @@ local function cmd_submit()
 end
 
 local function cmd_pull()
+  if not ensure_review_started() then return end
   vim.notify("lreview: pulling remote updates...", vim.log.levels.INFO)
   review.pull_review_async(function(success)
     if success then
@@ -262,7 +276,7 @@ local function cmd_pull_requests()
   vim.notify("lreview: fetching pull request list...", vim.log.levels.INFO)
   require("lreview.pull_request").pull_async(function(success, count, err)
     if success then
-      vim.notify("lreview: cached " .. count .. " pull request(s)", vim.log.levels.INFO)
+      vim.notify("lreview: cached " .. count .. " pull request(s)", vim.log.INFO)
     else
       vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
     end
@@ -270,6 +284,7 @@ local function cmd_pull_requests()
 end
 
 local function cmd_close(args)
+  if not ensure_review_started() then return end
   local number = args.args ~= "" and tonumber(args.args) or nil
   local ok, err = review.close_review(number)
   if not ok then
@@ -280,6 +295,7 @@ local function cmd_close(args)
 end
 
 local function cmd_approve(args)
+  if not ensure_review_started() then return end
   local number = args.args ~= "" and tonumber(args.args) or nil
   local ok, err = review.approve_review(number)
   if not ok then
@@ -290,10 +306,12 @@ local function cmd_approve(args)
 end
 
 local function cmd_toggle()
+  if not ensure_review_started() then return end
   require("lreview.ui.decor").toggle()
 end
 
 local function cmd_hover()
+  if not ensure_review_started() then return end
   local line = vim.api.nvim_win_get_cursor(0)[1]
   local abs = vim.fn.expand("%:p")
   local root = git.root(vim.fn.getcwd())
@@ -307,6 +325,7 @@ local function cmd_hover()
 end
 
 local function cmd_list()
+  if not ensure_review_started() then return end
   require("lreview.ui.list").open_quickfix()
 end
 

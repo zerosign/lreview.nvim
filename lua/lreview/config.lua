@@ -26,8 +26,10 @@ M.defaults = {
   ui = {
     decor = "both", -- "sign" | "virtual_text" | "both" | "none"
     float = { width = 0.5, height = 0.6 },
+    layout = "float", -- "float" | "split" | "vsplit"
   },
   open = { method = "checkout" }, -- fetch+checkout the MR branch
+  submit_immediately = false,
 }
 
 -- Deep merge b into a (mutates a, returns a). Tables are merged recursively,

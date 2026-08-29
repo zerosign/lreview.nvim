@@ -132,7 +132,95 @@ function M.add_comment(path, start_line, end_line, body)
   return thread, nil
 end
 
---- Submit the review: push all draft inline comments for the current MR.
+--- Create and submit a new comment thread immediately to the remote forge.
+---@param path string
+---@param start_line integer
+---@param end_line integer
+---@param body string
+---@return boolean, string|nil
+function M.push_thread_immediately(path, start_line, end_line, body)
+  if not M.current then
+    return false, "no active review"
+  end
+  local detail = M.current.detail
+  local resolved = adapter.resolve(M.current.cwd)
+  if not resolved then
+    return false, "no git remote detected"
+  end
+  local ctx = adapter.ctx(resolved, detail.number)
+  local batch = {
+    { path = path, line = start_line, body = body }
+  }
+  local ok, err = resolved.adapter.submit_inline_review(resolved.cfg, ctx, detail.number, batch)
+  if not ok then
+    return false, err
+  end
+  M.sync_review()
+  return true, nil
+end
+
+--- Submit a reply comment immediately to the remote forge.
+---@param thread_id string
+---@param body string
+---@return string|nil, string|nil  -- remote_comment_id, error
+function M.push_reply_immediately(thread_id, body)
+  if not M.current then
+    return nil, "no active review"
+  end
+  local detail = M.current.detail
+  local resolved = adapter.resolve(M.current.cwd)
+  if not resolved then
+    return nil, "no git remote detected"
+  end
+  local ctx = adapter.ctx(resolved, detail.number)
+
+  local reply_to_id = thread_id
+  if resolved.provider == "gh" or resolved.provider == "github" then
+    local cs = comments.comments_for_thread(thread_id)
+    if #cs > 0 then
+      reply_to_id = cs[1].remote_id
+    end
+  end
+
+  local comment_id, err = resolved.adapter.submit_reply(resolved.cfg, ctx, detail.number, reply_to_id, body)
+  if comment_id then
+    M.sync_review()
+  end
+  return comment_id, err
+end
+
+--- Update/edit a comment immediately on the remote forge.
+---@param c_id string
+---@param body string
+---@return boolean, string|nil
+function M.push_edit_immediately(c_id, body)
+  if not M.current then
+    return false, "no active review"
+  end
+  local detail = M.current.detail
+  local resolved = adapter.resolve(M.current.cwd)
+  if not resolved then
+    return false, "no git remote detected"
+  end
+  local ctx = adapter.ctx(resolved, detail.number)
+
+  local c = storage.query("SELECT * FROM comments WHERE c_id = ?", c_id)[1]
+  if not c then
+    return false, "comment not found"
+  end
+  local thread_id = c.t_id
+
+  if c.remote_id then
+    local ok, err = resolved.adapter.update_comment(resolved.cfg, ctx, detail.number, thread_id, c.remote_id, body)
+    if not ok then
+      return false, err
+    end
+    M.sync_review()
+  end
+  return true, nil
+end
+
+--- Submit the review: push all draft inline comments (new threads and replies) for the current MR.
 --- Only pushes inline comments; does NOT change platform review state.
 ---@return integer pushed, string|nil err
 function M.submit_review()
@@ -146,35 +234,70 @@ function M.submit_review()
   end
   local ctx = adapter.ctx(resolved, detail.number)
 
-  -- Collect draft threads + their comments.
-  local drafts = comments.draft_threads(detail.mo_id)
-  local batch = {}
-  for _, t in ipairs(drafts) do
-    local cs = comments.comments_for_thread(t.t_id)
-    for _, c in ipairs(cs) do
-      batch[#batch + 1] = {
-        path = t.path,
-        line = t.start_line,
-        body = c.body,
-        t_id = t.t_id,
-        c_id = c.c_id,
-      }
-    end
-  end
-  if #batch == 0 then
+  -- Query all comments that are drafts (remote_id IS NULL)
+  local drafts = storage.query([[
+    SELECT c.c_id, c.t_id, c.body, c.in_reply_to, t.path, t.start_line, t.end_line, t.is_draft as thread_is_draft
+    FROM comments c
+    JOIN threads t ON c.t_id = t.t_id
+    WHERE t.mo_id = ? AND c.remote_id IS NULL
+  ]], detail.mo_id)
+
+  if not drafts or #drafts == 0 then
     return 0, "no draft comments to submit"
   end
 
-  local ok, err = resolved.adapter.submit_inline_review(resolved.cfg, ctx, detail.number, batch)
-  if not ok then
-    return 0, err
+  local new_threads_batch = {}
+  local replies = {}
+
+  for _, d in ipairs(drafts) do
+    if d.thread_is_draft == 1 then
+      new_threads_batch[#new_threads_batch + 1] = {
+        path = d.path,
+        line = d.start_line,
+        body = d.body,
+        t_id = d.t_id,
+        c_id = d.c_id,
+      }
+    else
+      local reply_to_id = d.t_id
+      if resolved.provider == "gh" or resolved.provider == "github" then
+        local cs = comments.comments_for_thread(d.t_id)
+        if #cs > 0 then
+          reply_to_id = cs[1].remote_id
+        end
+      end
+      replies[#replies + 1] = {
+        t_id = d.t_id,
+        c_id = d.c_id,
+        body = d.body,
+        reply_to_id = reply_to_id,
+      }
+    end
   end
 
-  -- Mark threads synced on success.
-  for _, b in ipairs(batch) do
-    comments.mark_synced(b.t_id)
+  local count = 0
+
+  -- 1. Submit new threads in a batch
+  if #new_threads_batch > 0 then
+    local ok, err = resolved.adapter.submit_inline_review(resolved.cfg, ctx, detail.number, new_threads_batch)
+    if not ok then
+      return 0, err
+    end
+    count = count + #new_threads_batch
   end
-  return #batch, nil
+
+  -- 2. Submit replies individually
+  for _, r in ipairs(replies) do
+    local comment_id, err = resolved.adapter.submit_reply(resolved.cfg, ctx, detail.number, r.reply_to_id, r.body)
+    if not comment_id then
+      return count, err
+    end
+    count = count + 1
+  end
+
+  -- Sync remote state on success to update local IDs and clear draft markers
+  M.sync_review()
+  return count, nil
 end
 
 --- List draft comments for the current MR (for a review summary UI).

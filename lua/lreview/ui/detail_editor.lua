@@ -79,10 +79,6 @@ function M.open(detail)
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
   vim.bo[bufnr].modified = false
 
-  -- Map q to wipe buffer
-  local opts = { silent = true, noremap = true, buffer = bufnr }
-  vim.keymap.set("n", "q", "<cmd>bwipeout!<cr>", opts)
-
   -- Create local BufWriteCmd autocmd to handle saves (:w)
   vim.api.nvim_create_autocmd("BufWriteCmd", {
     buffer = bufnr,

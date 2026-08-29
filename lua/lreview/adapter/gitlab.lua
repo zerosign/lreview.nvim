@@ -206,6 +206,57 @@ function M.submit_inline_review(cfg, ctx, number, comments, body)
   return true, nil
 end
 
+--- Submit a reply to an existing discussion thread.
+---@param cfg table
+---@param ctx table
+---@param number integer  -- MR iid
+---@param thread_id string -- discussion ID
+---@param body string
+---@return string|nil, string|nil  -- remote_comment_id, error
+function M.submit_reply(cfg, ctx, number, thread_id, body)
+  local project = ctx.repo:gsub("/", "%%2F")
+  local argv = base_argv(cfg, ctx)
+  argv[#argv + 1] = "api"
+  argv[#argv + 1] = string.format("projects/%s/merge_requests/%d/discussions/%s/notes", project, number, thread_id)
+  argv[#argv + 1] = "-X"
+  argv[#argv + 1] = "POST"
+  argv[#argv + 1] = "-F"
+  argv[#argv + 1] = "body=" .. body
+  local res = base.run(argv, { cwd = ctx.cwd })
+  if not res.ok then
+    return nil, res.error
+  end
+  local data, err = base.parse_json(res)
+  if not data then
+    return nil, err
+  end
+  return tostring(data.id), nil
+end
+
+--- Update/edit a discussion note.
+---@param cfg table
+---@param ctx table
+---@param number integer
+---@param thread_id string
+---@param note_id string
+---@param body string
+---@return boolean, string|nil
+function M.update_comment(cfg, ctx, number, thread_id, note_id, body)
+  local project = ctx.repo:gsub("/", "%%2F")
+  local argv = base_argv(cfg, ctx)
+  argv[#argv + 1] = "api"
+  argv[#argv + 1] = string.format("projects/%s/merge_requests/%d/discussions/%s/notes/%s", project, number, thread_id, note_id)
+  argv[#argv + 1] = "-X"
+  argv[#argv + 1] = "PUT"
+  argv[#argv + 1] = "-F"
+  argv[#argv + 1] = "body=" .. body
+  local res = base.run(argv, { cwd = ctx.cwd })
+  if not res.ok then
+    return false, res.error
+  end
+  return true, nil
+end
+
 --- Close a merge request.
 ---@param cfg table
 ---@param ctx table
