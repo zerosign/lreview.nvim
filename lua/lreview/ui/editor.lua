@@ -235,7 +235,7 @@ function M.open_edit(c_id, current_body)
       end
     else
       if is_synced then
-        comments.update_comment_body_and_dirty(c_id, text, 1)
+        comments.update_comment_body_and_state(c_id, text, comments.STATE.MODIFIED)
       else
         comments.update_comment(c_id, text)
       end

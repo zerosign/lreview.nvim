@@ -44,8 +44,7 @@ CREATE TABLE IF NOT EXISTS comments (
   body        TEXT,
   created_at  TEXT,
   in_reply_to TEXT,
-  deleted     INTEGER NOT NULL DEFAULT 0,
-  dirty       INTEGER NOT NULL DEFAULT 0,
+  state       INTEGER NOT NULL DEFAULT 1, -- mapped to STATE enum
   FOREIGN KEY(t_id) REFERENCES threads(t_id)
 );
 

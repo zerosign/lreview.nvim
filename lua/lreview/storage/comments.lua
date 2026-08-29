@@ -92,23 +92,32 @@ function M.resolve_thread(t_id, resolved_val)
 end
 
 -- ---------------------------------------------------------------------------
+local STATE = {
+  DRAFT    = 1, -- (0001) New local draft
+  SYNCED   = 2, -- (0010) Clean remote comment
+  MODIFIED = 4, -- (0100) Synced comment edited locally
+  DELETED  = 8, -- (1000) Synced comment deleted locally
+}
+M.STATE = STATE
+
 -- Comments
 -- ---------------------------------------------------------------------------
 
 --- Add a comment to a thread.
 ---@param c lreview.Comment
 function M.add_comment(c)
+  local state_val = c.state or STATE.DRAFT
   storage.execute([[
-    INSERT OR REPLACE INTO comments (c_id, t_id, remote_id, author, body, created_at, in_reply_to, deleted, dirty)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  ]], c.c_id, c.t_id, c.remote_id, c.author, c.body, c.created_at, c.in_reply_to, c.deleted and 1 or 0, c.dirty and 1 or 0)
+    INSERT OR REPLACE INTO comments (c_id, t_id, remote_id, author, body, created_at, in_reply_to, state)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  ]], c.c_id, c.t_id, c.remote_id, c.author, c.body, c.created_at, c.in_reply_to, state_val)
 end
 
---- Get comments for a thread.
+--- Get comments for a thread (excludes pending deletes).
 ---@param t_id string
 ---@return table[]
 function M.comments_for_thread(t_id)
-  return storage.query("SELECT * FROM comments WHERE t_id = ? ORDER BY created_at", t_id)
+  return storage.query("SELECT * FROM comments WHERE t_id = ? AND state != ? ORDER BY created_at", t_id, STATE.DELETED)
 end
 
 --- Update a comment body.
@@ -118,18 +127,25 @@ function M.update_comment(c_id, body)
   storage.execute("UPDATE comments SET body = ? WHERE c_id = ?", body, c_id)
 end
 
---- Update a comment body and dirty status.
+--- Update a comment body and state.
 ---@param c_id string
 ---@param body string
----@param dirty integer
-function M.update_comment_body_and_dirty(c_id, body, dirty)
-  storage.execute("UPDATE comments SET body = ?, dirty = ? WHERE c_id = ?", body, dirty or 0, c_id)
+---@param state integer
+function M.update_comment_body_and_state(c_id, body, state)
+  storage.execute("UPDATE comments SET body = ?, state = ? WHERE c_id = ?", body, state, c_id)
 end
 
---- Mark a comment as clean (dirty = 0).
+--- Mark a comment as clean synced.
+---@param c_id string
+---@param remote_id string
+function M.mark_comment_synced(c_id, remote_id)
+  storage.execute("UPDATE comments SET remote_id = ?, state = ? WHERE c_id = ?", remote_id, STATE.SYNCED, c_id)
+end
+
+--- Mark a comment as clean synced (by remote_id).
 ---@param c_id string
 function M.mark_clean(c_id)
-  storage.execute("UPDATE comments SET dirty = 0 WHERE c_id = ?", c_id)
+  storage.execute("UPDATE comments SET state = ? WHERE c_id = ?", STATE.SYNCED, c_id)
 end
 
 --- Delete a comment.
@@ -138,10 +154,10 @@ function M.delete_comment(c_id)
   storage.execute("DELETE FROM comments WHERE c_id = ?", c_id)
 end
 
---- Soft-delete a comment (mark deleted = 1).
+--- Soft-delete a comment (mark state = STATE.DELETED).
 ---@param c_id string
 function M.soft_delete_comment(c_id)
-  storage.execute("UPDATE comments SET deleted = 1 WHERE c_id = ?", c_id)
+  storage.execute("UPDATE comments SET state = ? WHERE c_id = ?", STATE.DELETED, c_id)
 end
 
 --- Get all comments for all threads in a buffer (avoids N+1 query issue).

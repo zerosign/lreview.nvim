@@ -234,24 +234,32 @@ function M.submit_review()
   end
   local ctx = adapter.ctx(resolved, detail.number)
 
-  -- Query drafts (remote_id IS NULL) AND dirty edits (dirty = 1)
+  -- Query comments with state & 13 > 0 (DRAFT = 1, MODIFIED = 4, DELETED = 8)
   local drafts = storage.query([[
-    SELECT c.c_id, c.t_id, c.body, c.remote_id, c.dirty, c.in_reply_to, t.path, t.start_line, t.end_line, t.is_draft as thread_is_draft
+    SELECT c.c_id, c.t_id, c.body, c.remote_id, c.state, c.in_reply_to, t.path, t.start_line, t.end_line, t.is_draft as thread_is_draft
     FROM comments c
     JOIN threads t ON c.t_id = t.t_id
-    WHERE t.mo_id = ? AND (c.remote_id IS NULL OR c.dirty = 1)
+    WHERE t.mo_id = ? AND (c.state & 13) > 0
   ]], detail.mo_id)
 
   if not drafts or #drafts == 0 then
-    return 0, "no draft or edited comments to submit"
+    return 0, "no draft, edited, or deleted comments to submit"
   end
 
   local new_threads_batch = {}
   local replies = {}
   local edits = {}
+  local deletes = {}
 
   for _, d in ipairs(drafts) do
-    if d.remote_id and d.remote_id ~= "" and d.dirty == 1 then
+    if d.state == comments.STATE.DELETED then
+      deletes[#deletes + 1] = {
+        t_id = d.t_id,
+        c_id = d.c_id,
+        remote_id = d.remote_id,
+        body = d.body or "",
+      }
+    elseif d.state == comments.STATE.MODIFIED then
       edits[#edits + 1] = {
         t_id = d.t_id,
         c_id = d.c_id,
@@ -297,8 +305,12 @@ function M.submit_review()
     local snippet = e.body:gsub("\n", " "):sub(1, 45)
     summary[#summary + 1] = string.format("  [Edit Note]   %s", snippet)
   end
+  for _, dl in ipairs(deletes) do
+    local snippet = dl.body:gsub("\n", " "):sub(1, 45)
+    summary[#summary + 1] = string.format("  [Delete Note] %s", snippet)
+  end
 
-  local total_pending = #new_threads_batch + #replies + #edits
+  local total_pending = #new_threads_batch + #replies + #edits + #deletes
   local msg = table.concat(summary, "\n") .. string.format("\n\nPush these %d change(s) to %s?", total_pending, resolved.provider)
   local choice = vim.fn.confirm(msg, "&Yes\n&No", 2)
   if choice ~= 1 then
@@ -341,6 +353,17 @@ function M.submit_review()
     end
     -- Mark comment clean on success
     comments.mark_clean(e.c_id)
+    count = count + 1
+  end
+
+  -- 4. Submit deletes individually
+  for _, dl in ipairs(deletes) do
+    local ok, err = resolved.adapter.delete_comment(resolved.cfg, ctx, detail.number, dl.t_id, dl.remote_id)
+    if not ok then
+      return count, err
+    end
+    -- Delete row locally on success
+    comments.delete_comment(dl.c_id)
     count = count + 1
   end
 
@@ -397,13 +420,13 @@ function M.sync_review()
     for _, c in ipairs(t.comments or {}) do
       remote_c_ids[c.c_id] = true
 
-      -- Preserve local dirty edits during remote sync
-      local local_c = storage.query("SELECT dirty, body FROM comments WHERE remote_id = ?", c.remote_id)[1]
+      -- Preserve local modified/deleted states during remote sync
+      local local_c = storage.query("SELECT state, body FROM comments WHERE remote_id = ?", c.remote_id)[1]
       local body_val = c.body
-      local dirty_val = false
-      if local_c and local_c.dirty == 1 then
+      local state_val = comments.STATE.SYNCED
+      if local_c and (local_c.state == comments.STATE.MODIFIED or local_c.state == comments.STATE.DELETED) then
         body_val = local_c.body
-        dirty_val = true
+        state_val = local_c.state
       end
 
       comments.add_comment({
@@ -414,8 +437,7 @@ function M.sync_review()
         body = body_val,
         created_at = c.created_at,
         in_reply_to = c.in_reply_to,
-        deleted = false,
-        dirty = dirty_val,
+        state = state_val,
       })
     end
     n = n + 1
@@ -423,14 +445,14 @@ function M.sync_review()
 
   -- Detect and soft-delete local synced comments that were deleted on the remote
   local existing_comments = storage.query([[
-    SELECT c.c_id, c.remote_id, c.deleted
+    SELECT c.c_id, c.remote_id, c.state
     FROM comments c
     JOIN threads t ON c.t_id = t.t_id
     WHERE t.mo_id = ? AND c.remote_id IS NOT NULL
   ]], detail.mo_id)
 
   for _, ec in ipairs(existing_comments or {}) do
-    if not remote_c_ids[ec.remote_id] and ec.deleted == 0 then
+    if not remote_c_ids[ec.remote_id] and ec.state ~= comments.STATE.DELETED then
       comments.soft_delete_comment(ec.c_id)
     end
   end

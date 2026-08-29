@@ -133,9 +133,9 @@ end
 local found_gh_deleted = false
 local threads_gh2 = comments.threads_for_mr(detail_gh.mo_id)
 for _, t in ipairs(threads_gh2) do
-  local cs = comments.comments_for_thread(t.t_id)
+  local cs = storage.query("SELECT * FROM comments WHERE t_id = ?", t.t_id)
   for _, c in ipairs(cs) do
-    if c.body == gh_body and c.deleted == 1 then
+    if c.body == gh_body and c.state == comments.STATE.DELETED then
       found_gh_deleted = true
       break
     end
@@ -220,9 +220,9 @@ end
 local found_gl_deleted = false
 local threads_gl2 = comments.threads_for_mr(detail_gl.mo_id)
 for _, t in ipairs(threads_gl2) do
-  local cs = comments.comments_for_thread(t.t_id)
+  local cs = storage.query("SELECT * FROM comments WHERE t_id = ?", t.t_id)
   for _, c in ipairs(cs) do
-    if c.body == gl_body and c.deleted == 1 then
+    if c.body == gl_body and c.state == comments.STATE.DELETED then
       found_gl_deleted = true
       break
     end

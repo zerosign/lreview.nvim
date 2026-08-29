@@ -45,8 +45,6 @@ local function format_thread(thread_id)
     local status = ""
     if is_draft then
       status = " (Draft)"
-    elseif c.deleted == 1 then
-      status = " (Deleted)"
     end
     local time_str = c.created_at or ""
 
@@ -57,9 +55,6 @@ local function format_thread(thread_id)
 
     -- Format body (split by lines)
     local body = c.body
-    if c.deleted == 1 then
-      body = "[This comment has been deleted by the author]"
-    end
     for part in body:gmatch("[^\r\n]+") do
       add_line(part, c.c_id)
     end
@@ -122,7 +117,7 @@ local function handle_action(action)
     require("lreview.ui.editor").open_edit(c_id, target_comment.body)
   elseif action == "delete" then
     if not c_id then
-      vim.notify("lreview: move cursor onto a draft comment to delete it", vim.log.levels.WARN)
+      vim.notify("lreview: move cursor onto a comment to delete it", vim.log.levels.WARN)
       return
     end
     local ts = comments.comments_for_thread(M.state.thread_id)
@@ -133,20 +128,28 @@ local function handle_action(action)
         break
       end
     end
-    if not target_comment or (target_comment.remote_id and target_comment.remote_id ~= "") then
-      vim.notify("lreview: synced comments cannot be deleted", vim.log.levels.WARN)
-      return
+    if not target_comment then return end
+
+    local is_synced = target_comment.remote_id and target_comment.remote_id ~= ""
+    if is_synced then
+      comments.soft_delete_comment(c_id)
+      vim.notify("lreview: comment marked for deletion (press P on the panel to push)", vim.log.levels.INFO)
+    else
+      comments.delete_comment(c_id)
+      vim.notify("lreview: draft deleted", vim.log.levels.INFO)
     end
-    comments.delete_comment(c_id)
-    -- If no comments left, delete thread.
+
+    -- If no active comments left in thread, close thread view (only delete thread row if it is a draft)
     local remaining = comments.comments_for_thread(M.state.thread_id)
     if #remaining == 0 then
-      comments.delete_thread(M.state.thread_id)
+      local t = comments.get_thread(M.state.thread_id)
+      if t and t.is_draft == 1 then
+        comments.delete_thread(M.state.thread_id)
+      end
       M.close()
-      vim.notify("lreview: draft deleted and thread closed", vim.log.levels.INFO)
+      vim.notify("lreview: thread closed", vim.log.levels.INFO)
     else
       M.redraw()
-      vim.notify("lreview: draft deleted", vim.log.levels.INFO)
     end
     local bufnr = vim.fn.bufnr(M.state.path)
     if bufnr ~= -1 then

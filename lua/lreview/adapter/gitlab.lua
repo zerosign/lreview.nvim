@@ -257,6 +257,27 @@ function M.update_comment(cfg, ctx, number, thread_id, note_id, body)
   return true, nil
 end
 
+--- Delete a comment.
+---@param cfg table
+---@param ctx table
+---@param number integer
+---@param thread_id string
+---@param note_id string
+---@return boolean, string|nil
+function M.delete_comment(cfg, ctx, number, thread_id, note_id)
+  local project = ctx.repo:gsub("/", "%%2F")
+  local argv = base_argv(cfg, ctx)
+  argv[#argv + 1] = "api"
+  argv[#argv + 1] = string.format("projects/%s/merge_requests/%d/discussions/%s/notes/%s", project, number, thread_id, note_id)
+  argv[#argv + 1] = "-X"
+  argv[#argv + 1] = "DELETE"
+  local res = base.run(argv, { cwd = ctx.cwd })
+  if not res.ok then
+    return false, res.error
+  end
+  return true, nil
+end
+
 --- Close a merge request.
 ---@param cfg table
 ---@param ctx table
