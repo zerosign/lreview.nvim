@@ -34,7 +34,7 @@ end
 --- Open the MR detail editor for the active MR/PR.
 ---@param detail lreview.MRDetail
 function M.open(detail)
-  local buf_name = string.format("lreview_detail://%s/%d", detail.provider, detail.number)
+  local buf_name = "lreview_detail://" .. detail.provider .. "/" .. detail.number
   
   -- If buffer is already open, focus it
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
