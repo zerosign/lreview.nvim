@@ -116,6 +116,8 @@ Once you finish your review, run `:LocalReviewSubmit` (or `<leader>os`) to batch
 | `:LocalReviewCreate` | Create a new MR/PR using template and branch pickers. |
 | `:LocalReviewToggle` | Toggle buffer review signs and virtual text annotations. |
 | `:LocalReviewSummary` | Open the interactive review summary panel. |
+| `:LocalReviewNext` | Jump to the next comment thread in the current buffer. |
+| `:LocalReviewPrev` | Jump to the previous comment thread in the current buffer. |
 
 ---
 
@@ -148,6 +150,19 @@ require("lreview").setup({
   }
 })
 ```
+
+---
+
+## Gutter Line Highlights & Customization
+
+The plugin highlights gutter line numbers and signs to represent review statuses and code changes. These are linked to standard Vim groups by default so they match your theme automatically, but you can override them in your configuration:
+
+* `LReviewSignDraft` (Default: `WarningMsg` link) - Sign column indicator for draft comment threads.
+* `LReviewSignSynced` (Default: `Comment` link) - Sign column indicator for active remote threads.
+* `LReviewNumDraft` (Default: `DiffChange` link) - Gutter line number background highlight for drafts.
+* `LReviewNumSynced` (Default: `DiffAdd` link) - Gutter line number background highlight for active threads.
+* `LReviewNumResolved` (Default: `Comment` link) - Gutter line number background highlight for resolved threads.
+* `LReviewDiffAdd` (Default: `DiffAdd` link) - Gutter line number background highlight for git diff changes.
 
 ---
 

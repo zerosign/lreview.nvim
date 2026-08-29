@@ -168,18 +168,27 @@ USER COMMANDS                                             *lreview-commands*
                       and resolved threads in a split view with options to jump,
                       resolve, sync, delete draft threads, or push changes.
 
+`:LocalReviewNext`
+                      Jumps to the next discussion thread in the active buffer
+                      and automatically pops open the thread details.
+
+`:LocalReviewPrev`
+                      Jumps to the previous discussion thread in the active buffer
+                      and automatically pops open the thread details.
+
 ==============================================================================
-FLOATING PANEL KEYBINDINGS                              *lreview-keybindings*
+THREAD VIEW & PANEL KEYBINDINGS                         *lreview-keybindings*
 
-When viewing a floating comment thread panel, the following default keybinds
-are active on the buffer:
+When viewing discussion threads, Neovim displays all threads for the active line
+sequentially in a split buffer. Key actions are cursor-aware:
 
-  `r`                 Reply: opens a reply window to post a reply.
+  `r`                 Reply: opens a reply window for the selected thread.
   `e`                 Edit: edit an existing local draft comment.
-  `d`                 Delete: delete a local draft comment.
-  `s`                 Resolve/Reopen: toggles the resolved status of the active
-                      discussion thread.
-  `q`                 Close: closes the floating thread panel.
+  `d`                 Delete: delete a local draft comment/reply.
+  `s`                 Resolve/Reopen: toggles the resolved status of the thread
+                      under the cursor.
+  `P`                 Submit: push all local review comments.
+  `q`                 Close: closes the thread view panel.
 
 ==============================================================================
 GARBAGE COLLECTION                                              *lreview-gc*
