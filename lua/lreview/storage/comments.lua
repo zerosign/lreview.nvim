@@ -42,7 +42,29 @@ M.STATE = STATE
 M.PENDING_PUSH_MASK = STATE.DRAFT + STATE.MODIFIED + STATE.DELETED -- 13
 
 -- ---------------------------------------------------------------------------
--- Decoders for Compatibility
+-- Comment State Predicates
+-- ---------------------------------------------------------------------------
+--- Check comment state flags. All accept the raw integer `state` column value.
+
+function M.is_draft(s)    return s == STATE.DRAFT    end
+function M.is_synced(s)   return s == STATE.SYNCED   end
+function M.is_modified(s) return s == STATE.MODIFIED end
+function M.is_deleted(s)  return s == STATE.DELETED  end
+function M.is_conflict(s) return s == STATE.CONFLICT end
+function M.needs_push(s)  return bit.band(s, M.PENDING_PUSH_MASK) > 0 end
+
+-- ---------------------------------------------------------------------------
+-- Thread State Predicates
+-- ---------------------------------------------------------------------------
+--- Check thread state flags. All accept the raw integer `state` column value.
+
+function M.thread_is_draft(s)    return bit.band(s, THREAD_STATE.DRAFT)    > 0 end
+function M.thread_is_synced(s)   return bit.band(s, THREAD_STATE.SYNCED)   > 0 end
+function M.thread_is_resolved(s) return bit.band(s, THREAD_STATE.RESOLVED) > 0 end
+function M.thread_is_conflict(s) return bit.band(s, THREAD_STATE.CONFLICT) > 0 end
+
+-- ---------------------------------------------------------------------------
+-- Decoders (payload only — no computed boolean fields)
 -- ---------------------------------------------------------------------------
 local function decode_thread(row)
   if not row then return nil end
@@ -51,11 +73,9 @@ local function decode_thread(row)
   for k, v in pairs(payload) do
     row[k] = v
   end
+  -- Alias new canonical names to legacy names for call-site compatibility.
   row.start_line = row.line_start
-  row.end_line = row.line_end
-  row.is_draft   = bit.band(row.state, THREAD_STATE.DRAFT)    > 0 and 1 or 0
-  row.resolved   = bit.band(row.state, THREAD_STATE.RESOLVED) > 0 and 1 or 0
-  row.in_conflict = bit.band(row.state, THREAD_STATE.CONFLICT) > 0 and 1 or 0
+  row.end_line   = row.line_end
   return row
 end
 
@@ -66,9 +86,6 @@ local function decode_comment(row)
   for k, v in pairs(payload) do
     row[k] = v
   end
-  row.dirty      = (row.state == STATE.MODIFIED) and 1 or 0
-  row.deleted    = (row.state == STATE.DELETED)  and 1 or 0
-  row.in_conflict = (row.state == STATE.CONFLICT) and 1 or 0
   return row
 end
 
@@ -333,8 +350,7 @@ function M.comments_for_buffer(mo_id, path)
 
   for i, r in ipairs(rows) do
     local decoded = decode_comment(r)
-    decoded.resolved = bit.band(r.thread_state, THREAD_STATE.RESOLVED) > 0 and 1 or 0
-    decoded.thread_is_draft = bit.band(r.thread_state, THREAD_STATE.DRAFT) > 0 and 1 or 0
+    decoded.thread_state = r.thread_state
     decoded.start_line = r.line_start
     decoded.end_line = r.line_end
     rows[i] = decoded
@@ -355,9 +371,9 @@ function M.get_pending_comments(mo_id)
   ]], mo_id, M.PENDING_PUSH_MASK)
   for i, r in ipairs(rows) do
     local decoded = decode_comment(r)
+    decoded.thread_state = r.thread_state
     decoded.start_line = r.line_start
     decoded.end_line = r.line_end
-    decoded.thread_is_draft = bit.band(r.thread_state, THREAD_STATE.DRAFT) > 0 and 1 or 0
     rows[i] = decoded
   end
   return rows

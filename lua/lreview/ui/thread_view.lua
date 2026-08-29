@@ -33,7 +33,7 @@ local function format_thread(thread_id)
     end
   end
 
-  if t and t.resolved == 1 then
+  if t and comments.thread_is_resolved(t.state) then
     add_line("✔ RESOLVED THREAD")
     add_line("=================")
     add_line("")
@@ -69,7 +69,7 @@ local function format_thread(thread_id)
   add_line("")
   add_line("───────────────────────────────────────────────────────────")
   add_line(" [r] Reply  |  [e] Edit Draft  |  [d] Delete Draft  |  [q] Close")
-  local toggle_resolve_help = (t and t.resolved == 1) and " [s] Reopen Thread" or " [s] Resolve Thread"
+  local toggle_resolve_help = (t and comments.thread_is_resolved(t.state)) and " [s] Reopen Thread" or " [s] Resolve Thread"
   add_line(toggle_resolve_help)
 
   return lines, line_map
@@ -143,7 +143,7 @@ local function handle_action(action)
     local remaining = comments.comments_for_thread(M.state.thread_id)
     if #remaining == 0 then
       local t = comments.get_thread(M.state.thread_id)
-      if t and t.is_draft == 1 then
+      if t and comments.thread_is_draft(t.state) then
         comments.delete_thread(M.state.thread_id)
       end
       M.close()
@@ -158,7 +158,7 @@ local function handle_action(action)
   elseif action == "resolve" then
     local t = comments.get_thread(M.state.thread_id)
     if t then
-      local new_val = (t.resolved ~= 1)
+      local new_val = not comments.thread_is_resolved(t.state)
       local ok, err = review.resolve_thread(M.state.thread_id, new_val)
       if not ok then
         vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)

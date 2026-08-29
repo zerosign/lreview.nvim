@@ -73,8 +73,8 @@ function M.refresh(bufnr)
       threads[c.t_id] = {
         t_id = c.t_id,
         start_line = c.start_line,
-        resolved = c.resolved,
-        is_draft = c.thread_is_draft,
+        resolved = comments.thread_is_resolved(c.thread_state),
+        is_draft = comments.thread_is_draft(c.thread_state),
         comments = {}
       }
       thread_order[#thread_order + 1] = c.t_id
@@ -85,8 +85,8 @@ function M.refresh(bufnr)
   for _, t_id in ipairs(thread_order) do
     local t = threads[t_id]
     local cs = t.comments
-    local is_draft = (t.is_draft == 1)
-    local is_resolved = (t.resolved == 1)
+    local is_draft = t.is_draft
+    local is_resolved = t.resolved
     local sign_hl = is_resolved and "Comment" or (is_draft and "LReviewSignDraft" or "LReviewSignSynced")
     local text_hl = is_resolved and "Comment" or (is_draft and "LReviewVirtTextDraft" or "LReviewVirtTextSynced")
     local sign_text = is_resolved and "✔" or (is_draft and "💬" or "●")

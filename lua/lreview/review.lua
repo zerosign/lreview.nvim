@@ -269,7 +269,7 @@ function M.submit_review()
         remote_id = d.remote_id,
         body = d.body,
       }
-    elseif d.thread_is_draft == 1 then
+    elseif comments.thread_is_draft(d.thread_state) then
       new_threads_batch[#new_threads_batch + 1] = {
         path = d.path,
         line = d.start_line,
@@ -421,7 +421,7 @@ function M.sync_review()
         end_line = t.end_line, is_draft = false,
         resolved = t.resolved == 1, last_synced_at = now,
       })
-    elseif local_t.is_draft == 1 then
+    elseif comments.thread_is_draft(local_t.state) then
       -- Local DRAFT thread: never overwrite it with remote data.
       -- (A draft and a remote thread can share the same file/line but
       --  will have different t_ids, so this branch is rare but safe.)
@@ -571,7 +571,7 @@ function M.sync_review()
   -- ─── Handle threads deleted on the remote ───────────────────────────────
   local all_local_threads = comments.threads_for_mr(detail.mo_id)
   for _, lt in ipairs(all_local_threads) do
-    if lt.is_draft == 0 and not remote_t_ids[lt.t_id] then
+    if not comments.thread_is_draft(lt.state) and not remote_t_ids[lt.t_id] then
       -- Remote deleted this thread. Check for orphaned local drafts.
       local draft_children = storage.query([[
         SELECT COUNT(*) as n FROM comments WHERE t_id = ? AND state = ?
@@ -724,7 +724,7 @@ function M.resolve_thread(thread_id, resolved_val)
   end
 
   -- If it's a draft, just update local storage.
-  if t.is_draft == 1 then
+  if comments.thread_is_draft(t.state) then
     comments.resolve_thread(thread_id, resolved_val)
     return true, nil
   end

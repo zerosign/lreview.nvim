@@ -36,9 +36,9 @@ function M.open_quickfix()
 
       -- Format status tag
       local tag = "[● Active]"
-      if t.resolved == 1 then
+      if comments.thread_is_resolved(t.state) then
         tag = "[✔ Resolved]"
-      elseif t.is_draft == 1 then
+      elseif comments.thread_is_draft(t.state) then
         tag = "[💬 Draft]"
       end
 

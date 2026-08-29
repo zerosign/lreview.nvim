@@ -141,7 +141,7 @@ end
 -- Test synchronization markers
 comments.mark_synced(mock_thread.t_id)
 local thread_synced = comments.get_thread(mock_thread.t_id)
-if not thread_synced or thread_synced.is_draft == 1 or not thread_synced.last_synced_at then
+if not thread_synced or comments.thread_is_draft(thread_synced.state) or not thread_synced.last_synced_at then
   print("FAIL: Thread synchronization mapping failed.")
   os.exit(1)
 end
@@ -149,7 +149,7 @@ end
 -- Test thread resolution
 comments.resolve_thread(mock_thread.t_id, true)
 local resolved_thread = comments.get_thread(mock_thread.t_id)
-if not resolved_thread or resolved_thread.resolved ~= 1 then
+if not resolved_thread or not comments.thread_is_resolved(resolved_thread.state) then
   print("FAIL: Thread resolution toggle failed.")
   os.exit(1)
 end
