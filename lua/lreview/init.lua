@@ -44,6 +44,17 @@ local function cmd_query(args)
   vim.notify("lreview: " .. #mrs .. " MR(s) found", vim.log.levels.INFO)
 end
 
+local function resolve_detail_ref(cwd)
+  if review.current then
+    return tostring(review.current.detail.number)
+  end
+  local branch = git.current_branch(cwd)
+  if branch == "master" or branch == "main" or branch == "develop" then
+    return nil, "on default branch '" .. branch .. "'; please specify a PR/MR number or branch name"
+  end
+  return branch, nil
+end
+
 local function cmd_detail(args)
   local resolved = adapter.resolve(vim.fn.getcwd())
   if not resolved then
@@ -51,22 +62,18 @@ local function cmd_detail(args)
     return
   end
   local ref = args.args ~= "" and args.args or nil
+  local err
   if not ref then
-    if review.current then
-      ref = tostring(review.current.detail.number)
-    else
-      local branch = git.current_branch(vim.fn.getcwd())
-      if branch == "master" or branch == "main" or branch == "develop" then
-        vim.notify("lreview: on default branch '" .. branch .. "'; please specify a PR/MR number or branch name", vim.log.levels.WARN)
-        return
-      end
-      ref = branch
+    ref, err = resolve_detail_ref(resolved.cwd)
+    if err then
+      vim.notify("lreview: " .. err, vim.log.levels.WARN)
+      return
     end
   end
   local ctx = adapter.ctx(resolved, ref)
-  local detail, err = resolved.adapter.get_mr_detail(resolved.cfg, ctx)
+  local detail, err_detail = resolved.adapter.get_mr_detail(resolved.cfg, ctx)
   if not detail then
-    vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+    vim.notify("lreview: " .. tostring(err_detail), vim.log.levels.ERROR)
     return
   end
   local ok = storage.open()
@@ -85,6 +92,41 @@ local function cmd_start()
   vim.notify("lreview: reviewing " .. detail.provider .. " #" .. detail.number .. " (" .. detail.title .. ")", vim.log.levels.INFO)
 end
 
+local function resolve_target_branches(cwd)
+  local default_branch = git.default_branch(cwd) or "main"
+  local branches = git.remote_branches(cwd)
+  local target_choices = {}
+  local seen = {}
+  local function add_target(b)
+    if b and b ~= "" and not seen[b] then
+      seen[b] = true
+      target_choices[#target_choices + 1] = b
+    end
+  end
+  add_target(default_branch)
+  for _, b in ipairs(branches) do
+    add_target(b)
+  end
+  return target_choices
+end
+
+local function execute_create_mr(cwd, choice, title, target)
+  local body = choice and choice.content or ""
+  local source_branch = git.current_branch(cwd)
+  local url, err = review.create_review({
+    title = title,
+    body = body,
+    source_branch = source_branch,
+    target_branch = target,
+    template = (choice and choice.name ~= "(blank)") and choice.name or nil,
+  }, cwd)
+  if not url then
+    vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+    return
+  end
+  vim.notify("lreview: created MR: " .. url, vim.log.levels.INFO)
+end
+
 local function cmd_create()
   local cwd = vim.fn.getcwd()
   local resolved = adapter.resolve(cwd)
@@ -98,44 +140,13 @@ local function cmd_create()
     vim.notify("lreview: " .. tostring(terr), vim.log.levels.ERROR)
     return
   end
-  -- Determine the default branch and the candidate target branches.
-  local default_branch = git.default_branch(cwd) or "main"
-  local branches = git.remote_branches(cwd)
-  -- Ensure the default branch is in the candidate list (first choice).
-  local target_choices = {}
-  local seen = {}
-  local function add_target(b)
-    if b and b ~= "" and not seen[b] then
-      seen[b] = true
-      target_choices[#target_choices + 1] = b
-    end
-  end
-  add_target(default_branch)
-  for _, b in ipairs(branches) do
-    add_target(b)
-  end
-  -- Build the template picker choices: blank + each template.
+
+  local target_choices = resolve_target_branches(cwd)
   local choices = { { name = "(blank)", path = nil, content = "" } }
   for _, t in ipairs(templates or {}) do
     choices[#choices + 1] = t
   end
-  local function do_create(choice, title, target)
-    local body = choice and choice.content or ""
-    local source_branch = git.current_branch(cwd)
-    local url, err = review.create_review({
-      title = title,
-      body = body,
-      source_branch = source_branch,
-      target_branch = target,
-      template = (choice and choice.name ~= "(blank)") and choice.name or nil,
-    }, cwd)
-    if not url then
-      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-      return
-    end
-    vim.notify("lreview: created MR: " .. url, vim.log.levels.INFO)
-  end
-  -- Pick a template, then a target branch, then prompt for the title.
+
   vim.ui.select(choices, {
     prompt = "Select MR/PR template:",
     format_item = function(c) return c.name end,
@@ -154,7 +165,7 @@ local function cmd_create()
       if title == "" then
         return
       end
-      do_create(choice, title, target)
+      execute_create_mr(cwd, choice, title, target)
     end)
   end)
 end
