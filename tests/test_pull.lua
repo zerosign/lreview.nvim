@@ -65,12 +65,12 @@ end
 -- 1. GitHub Sandbox Test (Inject comment -> Pull -> Verify -> Delete)
 -- ============================================================================
 print("TEST: Initializing GitHub sandbox...")
-local detail_gh, err_gh = review.start_review("tmp/github-sample-review")
+local detail_gh, err_gh = review.init_session("tmp/github-sample-review")
 if not detail_gh then
   print("FAIL: Could not start GitHub review:", err_gh)
   os.exit(1)
 end
-
+ 
 print("TEST: Injecting remote comment on GitHub...")
 local gh_body = "Simulated remote comment from test suite"
 local post_gh = {
@@ -88,14 +88,14 @@ if res_gh.code ~= 0 then
 end
 local comment_gh = vim.json.decode(res_gh.stdout)
 local comment_gh_id = comment_gh.id
-
+ 
 print("TEST: Pulling comments from GitHub...")
 local success_gh = run_async_wait()
 if not success_gh then
   print("FAIL: GitHub async pull reported failure.")
   os.exit(1)
 end
-
+ 
 -- Verify consolidation in SQLite
 local threads_gh = comments.threads_for_mr(detail_gh.mo_id)
 local found_gh = false
@@ -108,13 +108,13 @@ for _, t in ipairs(threads_gh) do
     end
   end
 end
-
+ 
 if not found_gh then
   print("FAIL: Injected GitHub comment was not pulled into local database!")
   os.exit(1)
 end
 print("SUCCESS: Injected GitHub comment was pulled and consolidated successfully.")
-
+ 
 -- Cleanup GitHub remote comment & test soft-deletion
 print("CLEANUP: Deleting injected GitHub comment...")
 local del_gh = {
@@ -122,14 +122,14 @@ local del_gh = {
   "repos/zerosign/sample-review/pulls/comments/" .. comment_gh_id
 }
 vim.system(del_gh):wait()
-
+ 
 print("TEST: Pulling comments again to verify GitHub soft-deletion...")
 local success_gh_del = run_async_wait()
 if not success_gh_del then
   print("FAIL: GitHub second async pull reported failure.")
   os.exit(1)
 end
-
+ 
 local found_gh_deleted = false
 local threads_gh2 = comments.threads_for_mr(detail_gh.mo_id)
 for _, t in ipairs(threads_gh2) do
@@ -141,19 +141,19 @@ for _, t in ipairs(threads_gh2) do
     end
   end
 end
-
+ 
 if not found_gh_deleted then
   print("FAIL: Injected GitHub comment was not marked as soft-deleted locally!")
   os.exit(1)
 end
 print("SUCCESS: Injected GitHub comment was successfully consolidated as soft-deleted.")
-
-
+ 
+ 
 -- ============================================================================
 -- 2. GitLab Sandbox Test (Inject note -> Pull -> Verify -> Delete)
 -- ============================================================================
 print("\nTEST: Initializing GitLab sandbox...")
-local detail_gl, err_gl = review.start_review("tmp/gitlab-sample-review")
+local detail_gl, err_gl = review.init_session("tmp/gitlab-sample-review")
 if not detail_gl then
   print("FAIL: Could not start GitLab review:", err_gl)
   os.exit(1)

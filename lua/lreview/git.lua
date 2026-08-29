@@ -30,11 +30,24 @@ end
 ---@param cwd string|nil
 ---@return string|nil
 function M.root(cwd)
-  local out, err = git({ "rev-parse", "--show-toplevel" }, cwd)
-  if not out then
-    return nil
+  local uv = vim.uv or vim.loop
+  cwd = vim.fn.fnamemodify(cwd or vim.fn.getcwd(), ":p")
+  local current = cwd
+  while current ~= "" do
+    if current:sub(-1) == "/" or current:sub(-1) == "\\" then
+      current = current:sub(1, -2)
+    end
+    local stat = uv.fs_stat(current .. "/.git")
+    if stat then
+      return current
+    end
+    local parent = vim.fn.fnamemodify(current, ":h")
+    if parent == current then
+      break
+    end
+    current = parent
   end
-  return vim.trim(out)
+  return nil
 end
 
 --- Get the current branch name.
@@ -203,6 +216,36 @@ function M.create_branch(cwd, name)
     return false, err2
   end
   return true, nil
+end
+
+--- Get the line numbers of added/modified lines in the current branch relative to the target branch.
+---@param target_branch string
+---@param rel_path string
+---@param cwd string|nil
+---@return table<integer, boolean>|nil  -- map of line number -> true
+function M.changed_lines(target_branch, rel_path, cwd)
+  -- Use git diff -U0 target_branch... -- rel_path
+  -- Note: 3 dots compares against the merge base.
+  local out, err = git({ "diff", "-U0", target_branch .. "...", "--", rel_path }, cwd)
+  if not out then
+    return nil, err
+  end
+
+  local lines = {}
+  for line in out:gmatch("[^\r\n]+") do
+    local start_line, count_str = line:match("^@@ %-%d+,?%d* %+([0-9]+),?([0-9]*) @@")
+    if start_line then
+      local start = tonumber(start_line)
+      local count = tonumber(count_str) or 1
+      if count_str == "" then count = 1 end
+      if count > 0 then
+        for i = start, start + count - 1 do
+          lines[i] = true
+        end
+      end
+    end
+  end
+  return lines
 end
 
 return M

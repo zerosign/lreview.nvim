@@ -35,9 +35,10 @@ local function uuid()
   -- variant/version bits
   t[13] = "4"
   t[17] = string.format("%x", math.floor(math.random(8, 11)))
+ 
   return table.concat(t, "", 1, 8) .. "-" .. table.concat(t, "", 9, 12)
-    .. "-" .. table.concat(t, "", 13, 16) .. "-" .. table.concat(t, "", 17, 20)
-    .. "-" .. table.concat(t, "", 21, 32)
+      .. "-" .. table.concat(t, "", 13, 16) .. "-" .. table.concat(t, "", 17, 20)
+      .. "-" .. table.concat(t, "", 21, 32)
 end
 
 --- Resolve the current MR for a directory (by branch, or current branch).
@@ -65,7 +66,7 @@ end
 --- Start a review: resolve MR, open storage, cache the MR detail.
 ---@param cwd string|nil
 ---@return lreview.MRDetail|nil, string|nil
-function M.start_review(cwd)
+function M.init_session(cwd)
   cwd = vim.fn.fnamemodify(cwd or vim.fn.getcwd(), ":p")
   if cwd:sub(-1) == "/" or cwd:sub(-1) == "\\" then
     cwd = cwd:sub(1, -2)
@@ -85,7 +86,7 @@ function M.start_review(cwd)
     cwd = cwd,
   }
   -- Auto-pull remote updates only in interactive sessions. The headless pull
-  -- job sets vim.g.lreview_pull_job before calling start_review, which would
+  -- job sets vim.g.lreview_pull_job before calling init_session, which would
   -- otherwise spawn an unbounded chain of nested pull jobs (each job spawning
   -- another) and pile up orphaned nvim processes contending on the SQLite DB.
   if not vim.g.lreview_pull_job then
@@ -220,13 +221,15 @@ function M.push_edit_immediately(c_id, body)
   return true, nil
 end
 
---- Submit the review: push all draft inline comments (new threads and replies) for the current MR.
+--- Submit the review: push draft inline comments (new threads and replies) for the current MR.
 --- Only pushes inline comments; does NOT change platform review state.
+---@param thread_id string|nil  -- optional thread ID to submit only comments from a single thread
 ---@return integer pushed, string|nil err
-function M.submit_review()
+function M.submit_review(thread_id)
   if not M.current then
-    return 0, "no active review; run LocalReviewStart first"
+    return 0, "no active review"
   end
+
   local detail = M.current.detail
   local resolved = adapter.resolve(M.current.cwd)
   if not resolved then
@@ -236,6 +239,16 @@ function M.submit_review()
 
   -- Query pending comments via the storage layer
   local drafts = comments.get_pending_comments(detail.mo_id)
+
+  if thread_id then
+    local filtered = {}
+    for _, d in ipairs(drafts) do
+      if d.t_id == thread_id then
+        filtered[#filtered + 1] = d
+      end
+    end
+    drafts = filtered
+  end
 
   -- Block push if any unresolved conflicts exist.
   local conflict_count = comments.count_conflicts(detail.mo_id)
@@ -314,7 +327,8 @@ function M.submit_review()
   end
 
   local total_pending = #new_threads_batch + #replies + #edits + #deletes
-  local msg = table.concat(summary, "\n") .. string.format("\n\nPush these %d change(s) to %s?", total_pending, resolved.provider)
+  local msg = table.concat(summary, "\n") ..
+  string.format("\n\nPush these %d change(s) to %s?", total_pending, resolved.provider)
   local choice = vim.fn.confirm(msg, "&Yes\n&No", 2)
   if choice ~= 1 then
     vim.notify("lreview: push cancelled", vim.log.levels.INFO)
@@ -416,10 +430,15 @@ function M.sync_review()
     if local_t == nil then
       -- Brand new remote thread — insert as SYNCED.
       comments.create_thread({
-        t_id = t.t_id, mo_id = detail.mo_id, path = t.path,
-        commit_sha = t.commit_sha, start_line = t.start_line,
-        end_line = t.end_line, is_draft = false,
-        resolved = t.resolved == 1, last_synced_at = now,
+        t_id = t.t_id,
+        mo_id = detail.mo_id,
+        path = t.path,
+        commit_sha = t.commit_sha,
+        start_line = t.start_line,
+        end_line = t.end_line,
+        is_draft = false,
+        resolved = t.resolved == 1,
+        last_synced_at = now,
       })
     elseif comments.thread_is_draft(local_t.state) then
       -- Local DRAFT thread: never overwrite it with remote data.
@@ -428,10 +447,15 @@ function M.sync_review()
     else
       -- Existing synced thread: update resolved bit and payload.
       comments.create_thread({
-        t_id = t.t_id, mo_id = detail.mo_id, path = t.path,
-        commit_sha = t.commit_sha, start_line = t.start_line,
-        end_line = t.end_line, is_draft = false,
-        resolved = t.resolved == 1, last_synced_at = now,
+        t_id = t.t_id,
+        mo_id = detail.mo_id,
+        path = t.path,
+        commit_sha = t.commit_sha,
+        start_line = t.start_line,
+        end_line = t.end_line,
+        is_draft = false,
+        resolved = t.resolved == 1,
+        last_synced_at = now,
       })
     end
 
@@ -457,7 +481,9 @@ function M.sync_review()
         -- Re-find decoded version
         local decoded_lc
         for _, dc in ipairs(lc) do
-          if dc.c_id == (local_c.c_id) then decoded_lc = dc; break end
+          if dc.c_id == (local_c.c_id) then
+            decoded_lc = dc; break
+          end
         end
         -- Also check DELETED state which is filtered out of comments_for_thread
         if not decoded_lc then
@@ -476,16 +502,18 @@ function M.sync_review()
 
           if lstate == comments.STATE.DRAFT then
             -- DRAFT: never overwrite.
-
           elseif lstate == comments.STATE.SYNCED then
             -- Clean local copy: remote is authoritative, update body + meta.
             comments.add_comment({
-              c_id = c.c_id, t_id = t.t_id, remote_id = c.remote_id,
-              author = c.author, body = c.body,
-              created_at = c.created_at, in_reply_to = c.in_reply_to,
+              c_id = c.c_id,
+              t_id = t.t_id,
+              remote_id = c.remote_id,
+              author = c.author,
+              body = c.body,
+              created_at = c.created_at,
+              in_reply_to = c.in_reply_to,
               state = comments.STATE.SYNCED,
             })
-
           elseif lstate == comments.STATE.MODIFIED then
             -- We have a pending local edit. Check if remote changed the base.
             local synced_body = decoded_lc.synced_body
@@ -498,7 +526,6 @@ function M.sync_review()
                 vim.log.levels.WARN)
             end
             -- else: remote base unchanged, keep MODIFIED — nothing to do.
-
           elseif lstate == comments.STATE.DELETED then
             -- We want to delete it; check if remote changed the base.
             local synced_body = decoded_lc.synced_body
@@ -511,7 +538,6 @@ function M.sync_review()
                 vim.log.levels.WARN)
             end
             -- else: remote unchanged, keep DELETED state — push will do the delete.
-
           elseif lstate == comments.STATE.CONFLICT then
             -- Already in conflict — update the stored remote_body snapshot
             -- in case a newer remote version arrived.
@@ -521,9 +547,13 @@ function M.sync_review()
       else
         -- First time we see this comment: insert as SYNCED.
         comments.add_comment({
-          c_id = c.c_id, t_id = t.t_id, remote_id = c.remote_id,
-          author = c.author, body = c.body,
-          created_at = c.created_at, in_reply_to = c.in_reply_to,
+          c_id = c.c_id,
+          t_id = t.t_id,
+          remote_id = c.remote_id,
+          author = c.author,
+          body = c.body,
+          created_at = c.created_at,
+          in_reply_to = c.in_reply_to,
           state = comments.STATE.SYNCED,
         })
       end
@@ -550,7 +580,6 @@ function M.sync_review()
       if lstate == comments.STATE.SYNCED then
         -- Clean local copy deleted remotely → hard delete locally too.
         comments.delete_comment(ec.c_id)
-
       elseif lstate == comments.STATE.MODIFIED then
         -- We had a pending edit but remote deleted it → CONFLICT.
         comments.mark_comment_conflict(ec.c_id, "", "remote_deleted")
@@ -558,7 +587,6 @@ function M.sync_review()
           string.format("lreview: conflict on %s:%d — remote deleted a comment you are editing",
             ec.path or "?", ec.line_start or 0),
           vim.log.levels.WARN)
-
       elseif lstate == comments.STATE.DELETED then
         -- Both sides want it gone: hard delete (agree).
         comments.delete_comment(ec.c_id)
@@ -669,6 +697,7 @@ function M.approve_review(number)
   end
   return true, nil
 end
+
 --- Update an MR/PR's title and description.
 ---@param title string
 ---@param body string
@@ -767,7 +796,7 @@ function M.pull_review_async(callback)
     "--cmd",
     "set runtimepath^=" .. vim.fn.escape(plugin_root, " "),
     "-c",
-    string.format("lua vim.g.lreview_pull_job = true; require('lreview').api.start_review(%q)", current_cwd),
+    string.format("lua vim.g.lreview_pull_job = true; require('lreview').api.init_session(%q)", current_cwd),
     "-c",
     "lua require('lreview').api.sync_review()",
     "-c",
@@ -789,6 +818,11 @@ function M.pull_review_async(callback)
         local tv = require("lreview.ui.thread_view")
         if tv.state and vim.api.nvim_buf_is_valid(tv.state.bufnr) then
           tv.redraw()
+        end
+        -- Refresh summary panel if it is open
+        local summary = require("lreview.ui.summary")
+        if summary.state and vim.api.nvim_buf_is_valid(summary.state.bufnr) then
+          summary.redraw()
         end
       end
       if callback then

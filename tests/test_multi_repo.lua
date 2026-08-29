@@ -50,7 +50,7 @@ end
 -- 1. Sync First Repository (gitlab-sample-review)
 -- ============================================================================
 print("TEST: Starting review on first repository...")
-local detail1, err1 = review.start_review("tmp/gitlab-sample-review")
+local detail1, err1 = review.init_session("tmp/gitlab-sample-review")
 if not detail1 then
   print("FAIL: Could not start review 1:", err1)
   os.exit(1)
@@ -69,7 +69,7 @@ if vim.fn.isdirectory(repo2_path) == 0 then
 end
 
 print("\nTEST: Starting review on second repository...")
-local detail2, err2 = review.start_review(repo2_path)
+local detail2, err2 = review.init_session(repo2_path)
 if not detail2 then
   print("FAIL: Could not start review 2:", err2)
   os.exit(1)

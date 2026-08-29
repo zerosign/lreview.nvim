@@ -1,0 +1,335 @@
+local comments = require("lreview.storage.comments")
+local review = require("lreview.review")
+local git = require("lreview.git")
+local config = require("lreview.config")
+
+local M = {}
+
+local ns = vim.api.nvim_create_namespace("lreview_summary")
+
+local function setup_highlights()
+  local defs = {
+    LReviewSummaryDraft = { link = "WarningMsg" },
+    LReviewSummaryActive = { link = "Identifier" },
+    LReviewSummaryResolved = { link = "Comment" },
+    LReviewSummaryConflict = { link = "ErrorMsg" },
+    LReviewSummaryHeader = { link = "Title" },
+    LReviewSummaryLocation = { link = "Directory" },
+  }
+  for name, opts in pairs(defs) do
+    if vim.fn.hlexists(name) == 0 then
+      vim.api.nvim_set_hl(0, name, opts)
+    end
+  end
+end
+
+M.state = nil -- { bufnr, winid, threads_map = { [line] = thread }, show_all = boolean }
+
+function M.close()
+  if M.state then
+    if M.state.winid and vim.api.nvim_win_is_valid(M.state.winid) then
+      vim.api.nvim_win_close(M.state.winid, true)
+    end
+    M.state = nil
+  end
+end
+
+function M.redraw()
+  if not M.state or not vim.api.nvim_buf_is_valid(M.state.bufnr) then return end
+  if not review.current then return end
+
+  local mo_id = review.current.detail.mo_id
+  local root = git.root(review.current.cwd)
+  if not root then return end
+
+  local threads = comments.threads_for_mr(mo_id)
+  local lines = {}
+  local threads_map = {}
+
+  lines[#lines + 1] = "=== Local Review Summary ==="
+  lines[#lines + 1] = "Filter: " .. (M.state.show_all and "[Showing All]" or "[Active & Drafts Only]") .. " (f: toggle filter, u: pull/sync)"
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = string.format(" %-12s %-12s %-25s %s", "Status", "Author", "Location", "Preview")
+  lines[#lines + 1] = string.rep("─", 80)
+
+  local count = 0
+  for _, t in ipairs(threads) do
+    local is_resolved = comments.thread_is_resolved(t.state)
+    if M.state.show_all or not is_resolved then
+      local cs = comments.comments_for_thread(t.t_id)
+      if #cs > 0 then
+        count = count + 1
+        local first = cs[1]
+        local author = first.author or "me"
+        local body = first.body:gsub("[\r\n]+", " ")
+        if #body > 40 then
+          body = body:sub(1, 37) .. "..."
+        end
+
+        local status = "[● Active]"
+        if is_resolved then
+          status = "[✔ Resolved]"
+        elseif comments.thread_is_draft(t.state) then
+          status = "[💬 Draft]"
+        end
+
+        -- check for pending edits or deletions or conflicts in the thread comments
+        local has_edit = false
+        local has_del = false
+        local has_conflict = false
+        for _, c in ipairs(cs) do
+          if c.state == comments.STATE.MODIFIED then
+            has_edit = true
+          elseif c.state == comments.STATE.DELETED then
+            has_del = true
+          elseif c.state == comments.STATE.CONFLICT then
+            has_conflict = true
+          end
+        end
+
+        if has_conflict then
+          status = "[⚠ Conflict]"
+        elseif has_del then
+          status = "[⇡ Deleted]"
+        elseif has_edit then
+          status = "[⇡ Modified]"
+        end
+
+        local loc = string.format("%s:%d", t.path, t.start_line)
+        if #loc > 24 then
+          loc = "..." .. loc:sub(-21)
+        end
+
+        lines[#lines + 1] = string.format(" %-12s %-12s %-25s %s", status, author, loc, body)
+        threads_map[#lines] = t
+      end
+    end
+  end
+
+  if count == 0 then
+    lines[#lines + 1] = "  No discussions found."
+  end
+
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = string.rep("─", 80)
+  lines[#lines + 1] = " [o/<CR>] Jump/Open Thread | [s/r] Resolve/Reopen | [d] Delete Draft"
+  lines[#lines + 1] = " [p] Push Selected         | [P] Push All         | [q] Close"
+
+  M.state.threads_map = threads_map
+
+  vim.bo[M.state.bufnr].modifiable = true
+  vim.api.nvim_buf_set_lines(M.state.bufnr, 0, -1, false, lines)
+  vim.bo[M.state.bufnr].modifiable = false
+
+  setup_highlights()
+  vim.api.nvim_buf_clear_namespace(M.state.bufnr, ns, 0, -1)
+
+  -- Highlight header lines (0-indexed in API)
+  vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, "LReviewSummaryHeader", 0, 0, -1)
+  vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, "Comment", 1, 0, -1)
+  vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, "LReviewSummaryHeader", 3, 0, -1)
+  vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, "Comment", 4, 0, -1)
+
+  -- Highlight each mapped thread line
+  for line_idx, t in pairs(threads_map) do
+    local is_resolved = comments.thread_is_resolved(t.state)
+    local is_draft = comments.thread_is_draft(t.state)
+
+    local has_edit = false
+    local has_del = false
+    local has_conflict = false
+    local cs = comments.comments_for_thread(t.t_id)
+    for _, c in ipairs(cs) do
+      if c.state == comments.STATE.MODIFIED then
+        has_edit = true
+      elseif c.state == comments.STATE.DELETED then
+        has_del = true
+      elseif c.state == comments.STATE.CONFLICT then
+        has_conflict = true
+      end
+    end
+
+    local hl_group = "LReviewSummaryActive"
+    if has_conflict then
+      hl_group = "LReviewSummaryConflict"
+    elseif is_resolved then
+      hl_group = "LReviewSummaryResolved"
+    elseif is_draft or has_edit or has_del then
+      hl_group = "LReviewSummaryDraft"
+    end
+
+    -- Highlight status column (index 1 to 13)
+    vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, hl_group, line_idx - 1, 1, 13)
+    -- Highlight location column (index 27 to 52)
+    vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, "LReviewSummaryLocation", line_idx - 1, 27, 52)
+  end
+
+  local total_lines = #lines
+  if total_lines >= 4 then
+    vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, "Comment", total_lines - 3, 0, -1)
+    vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, "Comment", total_lines - 2, 0, -1)
+    vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, "Comment", total_lines - 1, 0, -1)
+  end
+end
+
+local function refresh_buffer_highlights(path)
+  local decor = require("lreview.ui.decor")
+  for bufnr, _ in pairs(decor.enabled_buffers) do
+    if vim.api.nvim_buf_is_valid(bufnr) then
+      local name = vim.api.nvim_buf_get_name(bufnr)
+      local suffix = path:gsub("%.", "%%."):gsub("%-", "%%-")
+      if name:match(suffix .. "$") then
+        decor.refresh(bufnr)
+      end
+    end
+  end
+end
+
+local function refresh_all_buffer_highlights()
+  local decor = require("lreview.ui.decor")
+  for bufnr, _ in pairs(decor.enabled_buffers) do
+    if vim.api.nvim_buf_is_valid(bufnr) then
+      decor.refresh(bufnr)
+    end
+  end
+end
+
+local function handle_action(action)
+  if not M.state then return end
+  local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+  local thread = M.state.threads_map[cursor_line]
+
+  if not thread and action ~= "push_all" and action ~= "pull" then
+    vim.notify("lreview: move cursor onto a discussion row to perform action", vim.log.levels.WARN)
+    return
+  end
+
+  if action == "open" then
+    M.close()
+    local root = git.root(review.current.cwd)
+    if not root then return end
+    vim.cmd("edit " .. root .. "/" .. thread.path)
+    vim.api.nvim_win_set_cursor(0, { thread.start_line, 0 })
+    require("lreview.ui.thread_view").show(vim.api.nvim_get_current_buf(), thread.path, thread.start_line)
+  elseif action == "resolve" then
+    local new_val = not comments.thread_is_resolved(thread.state)
+    local ok, err = review.resolve_thread(thread.t_id, new_val)
+    if not ok then
+      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+      return
+    end
+    M.redraw()
+    refresh_buffer_highlights(thread.path)
+    vim.notify(new_val and "lreview: thread resolved" or "lreview: thread reopened", vim.log.levels.INFO)
+  elseif action == "delete" then
+    if comments.thread_is_draft(thread.state) then
+      local path = thread.path
+      comments.delete_thread(thread.t_id)
+      M.redraw()
+      refresh_buffer_highlights(path)
+      vim.notify("lreview: local draft thread deleted", vim.log.levels.INFO)
+    else
+      vim.notify("lreview: cannot delete a synced remote thread directly", vim.log.levels.WARN)
+    end
+  elseif action == "push_selected" then
+    vim.notify("lreview: submitting selected thread changes...", vim.log.levels.INFO)
+    local count, err = review.submit_review(thread.t_id)
+    if err then
+      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+    else
+      vim.notify(string.format("lreview: successfully pushed %d comment(s)", count), vim.log.levels.INFO)
+      M.redraw()
+      refresh_buffer_highlights(thread.path)
+    end
+  elseif action == "push_all" then
+    vim.notify("lreview: submitting all local changes...", vim.log.levels.INFO)
+    local count, err = review.submit_review()
+    if err then
+      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+    else
+      vim.notify(string.format("lreview: successfully pushed %d comment(s)", count), vim.log.levels.INFO)
+      M.redraw()
+      refresh_all_buffer_highlights()
+    end
+  elseif action == "pull" then
+    vim.notify("lreview: pulling remote updates...", vim.log.levels.INFO)
+    review.pull_review_async(function(success)
+      if success then
+        M.redraw()
+        refresh_all_buffer_highlights()
+      end
+    end)
+  end
+end
+
+function M.toggle_filter()
+  if M.state then
+    M.state.show_all = not M.state.show_all
+    M.redraw()
+  end
+end
+
+function M.open()
+  if not review.current then
+    local detail, err = review.init_session()
+    if not detail then
+      vim.notify("lreview: failed to initialize review session: " .. tostring(err), vim.log.levels.ERROR)
+      return
+    end
+  end
+
+  M.close()
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].filetype = "lreview_summary"
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].bufhidden = "wipe"
+
+  M.state = {
+    bufnr = buf,
+    winid = nil,
+    threads_map = {},
+    show_all = false,
+  }
+
+  local opts = { silent = true, noremap = true, buffer = buf }
+  vim.keymap.set("n", "q", function() M.close() end, opts)
+  vim.keymap.set("n", "<esc>", function() M.close() end, opts)
+  vim.keymap.set("n", "o", function() handle_action("open") end, opts)
+  vim.keymap.set("n", "<CR>", function() handle_action("open") end, opts)
+  vim.keymap.set("n", "s", function() handle_action("resolve") end, opts)
+  vim.keymap.set("n", "r", function() handle_action("resolve") end, opts)
+  vim.keymap.set("n", "d", function() handle_action("delete") end, opts)
+  vim.keymap.set("n", "p", function() handle_action("push_selected") end, opts)
+  vim.keymap.set("n", "P", function() handle_action("push_all") end, opts)
+  vim.keymap.set("n", "u", function() handle_action("pull") end, opts)
+  vim.keymap.set("n", "f", function() M.toggle_filter() end, opts)
+
+  local ui_cfg = config.get_defaults().ui or {}
+  local layout = ui_cfg.layout or "split"
+  if layout == "float" then
+    layout = "split"
+  end
+  local winid
+
+  if layout == "split" or layout == "vsplit" then
+    local split_pos = ui_cfg.split and ui_cfg.split.position or "botright"
+    local split_size = ui_cfg.split and ui_cfg.split.size or 15
+    local split_cmd = (layout == "vsplit") and "vnew" or "new"
+
+    vim.cmd(string.format("silent %s %d%s", split_pos, split_size, split_cmd))
+    winid = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(winid, buf)
+  else
+    winid = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(winid, buf)
+  end
+
+  M.state.winid = winid
+  M.redraw()
+  if vim.api.nvim_buf_line_count(buf) >= 6 then
+    pcall(vim.api.nvim_win_set_cursor, winid, { 6, 1 })
+  end
+end
+
+return M

@@ -81,10 +81,10 @@ vim.fn.confirm = function() return 1 end
 -- 2. Test Review Orchestration Operations (review.lua)
 -- ============================================================================
 
--- Test start_review
-local detail, err = review.start_review(".")
+-- Test init_session
+local detail, err = review.init_session(".")
 if not detail or detail.number ~= 100 then
-  print("FAIL: start_review failed: " .. tostring(err))
+  print("FAIL: init_session failed: " .. tostring(err))
   os.exit(1)
 end
 
@@ -136,10 +136,10 @@ print("SUCCESS: Review orchestrator methods verified.")
 -- ============================================================================
 
 -- Reset review session
-review.start_review(".")
+review.init_session(".")
 
--- Test list command
-vim.cmd("LocalReviewList")
+-- Test summary command
+vim.cmd("LocalReviewSummary")
 
 -- Test detail command
 vim.cmd("LocalReviewDetail")

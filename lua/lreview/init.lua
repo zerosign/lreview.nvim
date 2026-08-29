@@ -13,22 +13,23 @@ local M = {}
 ---@param opts table|nil
 function M.setup(opts)
   config.setup(opts)
-  storage.open()
   M.register_commands()
 
   -- Automatically start review and enable highlights on buffer open
   local grp = vim.api.nvim_create_augroup("lreview_auto", { clear = true })
-  vim.api.nvim_create_autocmd({ "BufReadPost", "BufNewFile" }, {
+  vim.api.nvim_create_autocmd({ "BufReadPost", "BufNewFile", "BufWritePost" }, {
     group = grp,
     callback = function(ev)
       local bufnr = ev.buf
       if vim.bo[bufnr].buftype ~= "" then return end
-      local root = git.root(vim.fn.getcwd())
+      local bufname = vim.api.nvim_buf_get_name(bufnr)
+      if bufname == "" then return end
+      local root = git.root(vim.fn.fnamemodify(bufname, ":h"))
       if not root then return end
 
       vim.schedule(function()
         if not vim.api.nvim_buf_is_valid(bufnr) then return end
-        local detail = review.start_review()
+        local detail = review.init_session(root)
         if detail then
           require("lreview.ui.decor").enable(bufnr)
         end
@@ -103,14 +104,6 @@ local function cmd_detail(args)
   require("lreview.ui.detail_editor").open(detail)
 end
 
-local function cmd_start()
-  local detail, err = review.start_review(vim.fn.getcwd())
-  if not detail then
-    vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-    return
-  end
-  vim.notify("lreview: reviewing " .. detail.provider .. " #" .. detail.number .. " (" .. detail.title .. ")", vim.log.levels.INFO)
-end
 
 local function resolve_target_branches(cwd)
   local default_branch = git.default_branch(cwd) or "main"
@@ -231,7 +224,7 @@ end
 
 local function ensure_review_started()
   if not review.current then
-    local detail, err = review.start_review()
+    local detail, err = review.init_session()
     if not detail then
       vim.notify("lreview: failed to start review session: " .. tostring(err), vim.log.levels.ERROR)
       return false
@@ -344,9 +337,19 @@ local function cmd_open()
   require("lreview.ui.thread_view").show(vim.api.nvim_get_current_buf(), path, line)
 end
 
-local function cmd_list()
+local function cmd_summary()
   if not ensure_review_started() then return end
-  require("lreview.ui.list").open_quickfix()
+  require("lreview.ui.summary").open()
+end
+
+local function cmd_next()
+  if not ensure_review_started() then return end
+  require("lreview.ui.decor").next_thread()
+end
+
+local function cmd_prev()
+  if not ensure_review_started() then return end
+  require("lreview.ui.decor").prev_thread()
 end
 
 -- ---------------------------------------------------------------------------
@@ -362,7 +365,6 @@ function M.register_commands()
   })
 
   api.nvim_create_user_command("LocalReviewDetail", cmd_detail, { nargs = "?" })
-  api.nvim_create_user_command("LocalReviewStart", cmd_toggle, {})
   api.nvim_create_user_command("LocalReviewCreate", cmd_create, {})
   api.nvim_create_user_command("LocalReviewComment", cmd_comment, { range = true })
   api.nvim_create_user_command("LocalReviewSubmit", cmd_submit, {})
@@ -374,7 +376,9 @@ function M.register_commands()
   api.nvim_create_user_command("LocalReviewToggle", cmd_toggle, {})
   api.nvim_create_user_command("LocalReviewHover", cmd_open, {})
   api.nvim_create_user_command("LocalReviewOpen", cmd_open, {})
-  api.nvim_create_user_command("LocalReviewList", cmd_list, {})
+  api.nvim_create_user_command("LocalReviewSummary", cmd_summary, {})
+  api.nvim_create_user_command("LocalReviewNext", cmd_next, {})
+  api.nvim_create_user_command("LocalReviewPrev", cmd_prev, {})
 end
 
 --- Public API surface.
@@ -387,8 +391,8 @@ M.api = {
   thread_view = require("lreview.ui.thread_view"),
   editor = require("lreview.ui.editor"),
   detail_editor = require("lreview.ui.detail_editor"),
-  list = require("lreview.ui.list"),
-  start_review = review.start_review,
+  summary = require("lreview.ui.summary"),
+  init_session = review.init_session,
   add_comment = review.add_comment,
   submit_review = review.submit_review,
   sync_review = review.sync_review,
@@ -401,6 +405,8 @@ M.api = {
   fetch_users = require("lreview.users").fetch_users,
   pull_request = require("lreview.pull_request"),
   fetch_pull_requests = require("lreview.pull_request").fetch,
+  next_thread = require("lreview.ui.decor").next_thread,
+  prev_thread = require("lreview.ui.decor").prev_thread,
 }
 
 return M

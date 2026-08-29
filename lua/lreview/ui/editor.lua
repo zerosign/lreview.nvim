@@ -83,10 +83,11 @@ local function create_scratchpad(initial_text, save_callback)
     end,
   })
 
-  -- Keymap to save and close with <C-cr> or <leader>s
+  -- Keymap to save and close with <C-cr>, <leader>s, or <C-s>
   local opts = { silent = true, noremap = true, buffer = buf }
   vim.keymap.set("i", "<C-cr>", "<cmd>w<cr>", opts)
   vim.keymap.set("n", "<leader>s", "<cmd>w<cr>", opts)
+  vim.keymap.set({ "n", "i" }, "<C-s>", "<cmd>w<cr>", opts)
 
   -- Completion in the scratchpad:
   --   @mention  -> cached repo users (see :LocalReviewPullUser)

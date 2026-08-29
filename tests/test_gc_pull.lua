@@ -47,7 +47,7 @@ end
 
 -- 1. Initial Sync to populate cache
 print("1. Initializing GitLab sandbox and populating cache...")
-local detail, err = review.start_review("tmp/gitlab-sample-review")
+local detail, err = review.init_session("tmp/gitlab-sample-review")
 if not detail then
   print("FAIL: Could not start review:", err)
   os.exit(1)
@@ -71,7 +71,7 @@ storage.execute([[
 
 -- 3. Run garbage collection
 print("\n3. Triggering garbage collection (age_days = 30)...")
-storage.gc(30)
+storage.gc(30, true)
 
 -- 4. Verify local cache is purged
 local count_after_gc = #comments.threads_for_mr(detail.mo_id)
@@ -84,8 +84,8 @@ print("   SUCCESS: Local cache successfully purged by GC.")
 
 -- 5. Pull again to verify cache reconstitution
 print("\n4. Pulling from remote GitLab to reconstitute cache...")
--- start_review again to refresh state
-review.start_review("tmp/gitlab-sample-review")
+-- init_session again to refresh state
+review.init_session("tmp/gitlab-sample-review")
 run_async_wait()
 
 -- 6. Verify threads are restored

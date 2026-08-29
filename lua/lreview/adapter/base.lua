@@ -69,8 +69,9 @@ M.normalize_error = normalize_error
 ---@param opts.cwd string|nil
 ---@param opts.stdin string|nil
 ---@param opts.executor function|nil  -- function(argv, cwd) -> { stdout, stderr, code }
----@return lreview.CliResult
-function M.run(argv, opts)
+---@param callback fun(res: lreview.CliResult)|nil -- optional callback for async execution
+---@return lreview.CliResult|nil
+function M.run(argv, opts, callback)
   opts = opts or {}
   local executor = opts.executor or function(args, cwd)
     -- Use vim.system with the cwd option (vim.fn.system(args, cwd) does not
@@ -79,8 +80,37 @@ function M.run(argv, opts)
     if cwd then
       o.cwd = cwd
     end
-    local res = vim.system(args, o):wait()
-    return { stdout = res.stdout, stderr = res.stderr, code = res.code }
+    if callback then
+      vim.system(args, o, function(res)
+        vim.schedule(function()
+          local stdout = res.stdout or ""
+          local stderr = res.stderr or ""
+          local combined = stdout .. "\n" .. stderr
+          local ok = res.code == 0 and not looks_like_error(combined)
+          local err_msg = nil
+          if not ok then
+            err_msg = string.format("Command failed: %s | Error: %s", table.concat(argv, " "), normalize_error(combined))
+          end
+          callback({
+            ok = ok,
+            stdout = stdout,
+            stderr = stderr,
+            combined = combined,
+            code = res.code,
+            error = err_msg,
+          })
+        end)
+      end)
+      return nil
+    else
+      local res = vim.system(args, o):wait()
+      return { stdout = res.stdout, stderr = res.stderr, code = res.code }
+    end
+  end
+
+  if callback then
+    executor(argv, opts.cwd)
+    return nil
   end
 
   local res = executor(argv, opts.cwd)

@@ -190,9 +190,7 @@ function M.glab_discussions_to_threads(discussions, mo_id)
       local first = real[1]
       local pos = first.position
       local start_line, end_line
-      if pos then
-        -- vim.NIL is JSON null; treat it as nil (it is truthy, so guard with
-        -- type() checks before indexing).
+      if pos and pos ~= vim.NIL then
         local lr = pos.line_range
         if lr and type(lr) == "table" then
           local s = lr.start
@@ -211,10 +209,11 @@ function M.glab_discussions_to_threads(discussions, mo_id)
       local thread = {
         t_id = disc.id,
         mo_id = mo_id,
-        path = clean(pos and (pos.new_path or pos.old_path)),
+        path = clean(pos and (pos.new_path or pos.old_path)) or "",
         commit_sha = clean(pos and pos.head_sha),
-        start_line = start_line,
-        end_line = end_line,        is_draft = false,
+        start_line = start_line or 0,
+        end_line = end_line or 0,
+        is_draft = false,
         last_synced_at = nil,
         comments = {},
       }
@@ -225,7 +224,7 @@ function M.glab_discussions_to_threads(discussions, mo_id)
           author = n.author and n.author.username,
           body = n.body,
           created_at = nil,
-          in_reply_to = disc.id, -- all notes in a discussion share the discussion id
+          in_reply_to = disc.id,
         }
       end
       out[#out + 1] = thread

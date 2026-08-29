@@ -42,6 +42,7 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
   dependencies = {
     "kkharji/sqlite.lua",
   },
+  rocks = { "lsqlite3" },
   opts = {
     defaults = {
       db_path = vim.fn.stdpath("data") .. "/lreview/lreview.db",
@@ -65,15 +66,15 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
     require("lreview").setup(opts)
   end,
   keys = {
-    { "<leader>op",  "<cmd>LocalReviewQuery<cr>",   desc = "List PRs/MRs" },
-    { "<leader>ors", "<cmd>LocalReviewStart<cr>",   desc = "Start Review Session" },
-    { "<leader>orr", "<cmd>LocalReviewPull<cr>",    desc = "Pull/Sync Review Comments" },
-    { "<leader>orS", "<cmd>LocalReviewSubmit<cr>",  desc = "Submit PR Review" },
-    { "<leader>ovc", "<cmd>LocalReviewList<cr>",    desc = "View Review Comments Panel" },
-    { "<leader>ora", "<cmd>LocalReviewApprove<cr>", desc = "Approve MR/PR" },
-    { "<leader>orc", "<cmd>LocalReviewClose<cr>",   desc = "Close MR/PR" },
-    { "<leader>orn", "<cmd>LocalReviewCreate<cr>",  desc = "Create MR/PR" },
-    { "<leader>ca",  ":LocalReviewComment<cr>",     mode = "x", desc = "Add inline review comment" },
+    { "<leader>oq",  "<cmd>LocalReviewQuery<cr>",   desc = "List PRs/MRs" },
+    { "<leader>ot", "<cmd>LocalReviewToggle<cr>",   desc = "Toggle Review" },
+    { "<leader>op", "<cmd>LocalReviewPull<cr>",    desc = "Pull/Sync Review Comments" },
+    { "<leader>os", "<cmd>LocalReviewSubmit<cr>",  desc = "Submit PR Review" },
+    { "<leader>od", "<cmd>LocalReviewSummary<cr>", desc = "View Review Summary Panel" },
+    { "<leader>oA", "<cmd>LocalReviewApprove<cr>", desc = "Approve MR/PR" },
+    { "<leader>oC", "<cmd>LocalReviewClose<cr>",   desc = "Close MR/PR" },
+    { "<leader>on", "<cmd>LocalReviewCreate<cr>",  desc = "Create MR/PR" },
+    { "<leader>oc",  ":LocalReviewComment<cr>",     mode = "x", desc = "Add inline review comment" },
   },
 }
 ```
@@ -82,12 +83,12 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
 
 ## Usage Workflow
 
-### 1. Start a Review
-Run `:LocalReviewStart` in a repository. The plugin resolves the branch target MR/PR, queries the API, and syncs all remote discussions to SQLite.
+### 1. Enable Review Highlights
+Run `:LocalReviewToggle` (or press `<leader>ot`) in a repository. The plugin automatically and lazily resolves the git branch target MR/PR, queries the API, opens the SQLite database, and syncs all remote discussions to SQLite under the hood.
 
 ### 2. Browse & Annotate code
 * **View Comments:** Hover your cursor over a line marked with comments. The comments panel will open automatically showing the discussion thread.
-* **Add a Comment:** Make a visual selection of code lines and run `:LocalReviewComment` (or press `<leader>ca`). Write your comment and save with `:w` or `<leader>s` (automatically closes and caches it as a draft).
+* **Add a Comment:** Make a visual selection of code lines and run `:LocalReviewComment` (or press `<leader>oc`). Write your comment and save with `:w` or `<leader>s` (automatically closes and caches it as a draft).
 
 ### 3. Manage Conversations (Floating Panel)
 Press `K` or hover to focus the thread panel. Use these buffer-local keys:
@@ -98,7 +99,7 @@ Press `K` or hover to focus the thread panel. Use these buffer-local keys:
 * `q` / `<esc>`: Close the thread view.
 
 ### 4. Submit Staged Drafts
-Once you finish your review, run `:LocalReviewSubmit` (or `<leader>orS`) to batch push all local drafts to the remote platform.
+Once you finish your review, run `:LocalReviewSubmit` (or `<leader>os`) to batch push all local drafts to the remote platform.
 
 ---
 
@@ -108,14 +109,13 @@ Once you finish your review, run `:LocalReviewSubmit` (or `<leader>orS`) to batc
 | :--- | :--- |
 | `:LocalReviewQuery [scope]` | Query and list active MRs for this repository (`mine` or `all`). |
 | `:LocalReviewDetail [number]` | Print metadata details for a specific MR/PR. |
-| `:LocalReviewStart [branch/url]` | Start review session for the branch (defaults to current branch). |
 | `:LocalReviewPull` | Query and sync the latest updates from the remote host. |
 | `:LocalReviewSubmit` | Batch submit all local review comments. |
 | `:LocalReviewApprove` | Approve the active MR/PR. |
 | `:LocalReviewClose` | Close the active MR/PR. |
 | `:LocalReviewCreate` | Create a new MR/PR using template and branch pickers. |
 | `:LocalReviewToggle` | Toggle buffer review signs and virtual text annotations. |
-| `:LocalReviewList` | Open all review discussions in a Neovim Quickfix list. |
+| `:LocalReviewSummary` | Open the interactive review summary panel. |
 
 ---
 

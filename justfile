@@ -58,3 +58,11 @@ bench:
 # battery of markdown content. Requires a tmux session + the gitlab sample repo.
 comment-flow:
     ./scripts/test-comment-flow.fish
+
+# Open interactive sandbox Neovim on the gitlab sandbox repo
+run-gitlab:
+    ./scripts/sandbox-nvim.fish tmp/gitlab-sample-review
+
+# Open interactive sandbox Neovim on the github sandbox repo
+run-github:
+    ./scripts/sandbox-nvim.fish tmp/github-sample-review

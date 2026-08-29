@@ -1,7 +1,3 @@
----@meta
-
--- Storage layer: SQLite (sqlite.lua FFI wrapper) connection + migrations.
-
 local config = require("lreview.config")
 local schema = require("lreview.storage.schema")
 
@@ -12,6 +8,49 @@ M.db = nil
 
 local stmt_mod
 local clib
+local uv = vim.uv or vim.loop
+
+local gc_work = uv.new_work(function(db_path, lazy_sqlite, age_days)
+  if lazy_sqlite and lazy_sqlite ~= "" then
+    package.path = package.path .. ";" .. lazy_sqlite .. "/?.lua;" .. lazy_sqlite .. "/?/init.lua"
+  end
+  local ok, sqlite = pcall(require, "sqlite")
+  if not ok then
+    return "sqlite not available: " .. tostring(sqlite)
+  end
+  local db = sqlite.new(db_path)
+  if not db then
+    return "failed to open sqlite db: " .. tostring(db_path)
+  end
+
+  age_days = tonumber(age_days) or 30
+  local threshold_sec = os.time() - (age_days * 24 * 60 * 60)
+  local date_threshold = os.date("!%Y-%m-%dT%H:%M:%SZ", threshold_sec)
+
+  db:eval("DELETE FROM comments WHERE remote_id IS NOT NULL AND t_id IN (SELECT t.t_id FROM threads t JOIN pull_requests pr ON t.mo_id = pr.mo_id WHERE (t.state & 1) = 0 AND pr.state IN ('merged', 'closed') AND pr.updated_at < ?)", { date_threshold })
+  db:eval("DELETE FROM threads WHERE (state & 1) = 0 AND mo_id IN (SELECT mo_id FROM pull_requests WHERE state IN ('merged', 'closed') AND updated_at < ?) AND t_id NOT IN (SELECT DISTINCT t_id FROM comments WHERE remote_id IS NULL)", { date_threshold })
+  db:eval("DELETE FROM reviews WHERE mo_id IN (SELECT mo_id FROM pull_requests WHERE state IN ('merged', 'closed') AND updated_at < ?)", { date_threshold })
+  db:eval("DELETE FROM pull_requests WHERE state IN ('merged', 'closed') AND updated_at < ? AND mo_id NOT IN (SELECT DISTINCT mo_id FROM threads)", { date_threshold })
+
+  db:close()
+  return "success"
+end, function(result)
+  if result ~= "success" then
+    vim.schedule(function()
+      vim.notify("lreview background gc error: " .. tostring(result), vim.log.levels.WARN)
+    end)
+  end
+end)
+
+local function ensure_db()
+  if not M.db then
+    local ok, err = M.open()
+    if not ok then
+      error("lreview: failed to auto-open database: " .. tostring(err))
+    end
+  end
+  return M.db
+end
 
 --- Open (or create) the database and run migrations.
 ---@param db_path string|nil
@@ -30,8 +69,8 @@ function M.open(db_path)
 
   db_path = db_path or config.get_defaults().db_path
   local dir = vim.fn.fnamemodify(db_path, ":h")
-  if vim.fn.isdirectory(dir) == 0 then
-    vim.fn.mkdir(dir, "p")
+  if not uv.fs_stat(dir) then
+    uv.fs_mkdir(dir, 448) -- 0700 octal
   end
 
   -- We must find sqlite.lua dynamically for background sync jobs
@@ -59,7 +98,7 @@ function M.open(db_path)
   end
   local db_cfg = config.get_defaults().db
   if db_cfg.auto_housekeep then
-    M.gc(db_cfg.keep_days or 30)
+    M.gc(db_cfg.keep_days or 30, false)
   end
   return true, nil
 end
@@ -166,9 +205,7 @@ end
 ---@vararg any  -- positional bind params (nil values allowed)
 ---@return table[] rows
 function M.query(sql, ...)
-  if not M.db then
-    return {}
-  end
+  ensure_db()
   local stmt = stmt_mod:parse(M.db.conn, sql)
   local n = select("#", ...)
   local params = { ... }
@@ -188,9 +225,7 @@ end
 ---@vararg any  -- positional bind params (nil values allowed)
 ---@return integer|nil last_id
 function M.execute(sql, ...)
-  if not M.db then
-    return nil
-  end
+  ensure_db()
   local stmt = stmt_mod:parse(M.db.conn, sql)
   local n = select("#", ...)
   local params = { ... }
@@ -218,7 +253,16 @@ end
 --- Run garbage collection to clean up merged/closed PR comments older than X days.
 --- Protects local drafts from deletion.
 ---@param age_days integer|nil
-function M.gc(age_days)
+---@param sync boolean|nil  -- if true, run synchronously on main thread (defaults to false/async)
+function M.gc(age_days, sync)
+  if sync == nil then sync = false end
+  if not sync then
+    local db_path = config.get_defaults().db_path
+    local lazy_sqlite = vim.fn.stdpath("data") .. "/lazy/sqlite.lua/lua"
+    gc_work:queue(db_path, lazy_sqlite, tostring(age_days or 30))
+    return
+  end
+
   if not M.db then
     return
   end
