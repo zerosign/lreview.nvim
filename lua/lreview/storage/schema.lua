@@ -3,7 +3,7 @@
 
 local M = {}
 
-M.version = 1
+M.version = 3
 M.migrations = {}
 
 return M

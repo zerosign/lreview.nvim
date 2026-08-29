@@ -234,13 +234,8 @@ function M.submit_review()
   end
   local ctx = adapter.ctx(resolved, detail.number)
 
-  -- Query comments with state & 13 > 0 (DRAFT = 1, MODIFIED = 4, DELETED = 8)
-  local drafts = storage.query([[
-    SELECT c.c_id, c.t_id, c.body, c.remote_id, c.state, c.in_reply_to, t.path, t.start_line, t.end_line, t.is_draft as thread_is_draft
-    FROM comments c
-    JOIN threads t ON c.t_id = t.t_id
-    WHERE t.mo_id = ? AND (c.state & 13) > 0
-  ]], detail.mo_id)
+  -- Query pending comments via the storage layer
+  local drafts = comments.get_pending_comments(detail.mo_id)
 
   if not drafts or #drafts == 0 then
     return 0, "no draft, edited, or deleted comments to submit"
@@ -421,7 +416,11 @@ function M.sync_review()
       remote_c_ids[c.c_id] = true
 
       -- Preserve local modified/deleted states during remote sync
-      local local_c = storage.query("SELECT state, body FROM comments WHERE remote_id = ?", c.remote_id)[1]
+      local local_rows = comments.comments_for_thread(c.t_id)
+      local local_c
+      for _, lc in ipairs(local_rows) do
+        if lc.remote_id == c.remote_id then local_c = lc; break end
+      end
       local body_val = c.body
       local state_val = comments.STATE.SYNCED
       if local_c and (local_c.state == comments.STATE.MODIFIED or local_c.state == comments.STATE.DELETED) then

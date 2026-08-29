@@ -234,7 +234,7 @@ function M.gc(age_days)
       AND t_id IN (
         SELECT t.t_id FROM threads t
         JOIN pull_requests pr ON t.mo_id = pr.mo_id
-        WHERE t.is_draft = 0
+        WHERE (t.state & 1) = 0
           AND pr.state IN ('merged', 'closed')
           AND pr.updated_at < ?
       )
@@ -244,7 +244,7 @@ function M.gc(age_days)
   -- Exclude any threads that contain local draft replies (to prevent orphaned comments).
   M.execute([[
     DELETE FROM threads 
-    WHERE is_draft = 0 
+    WHERE (state & 1) = 0 
       AND mo_id IN (
         SELECT mo_id FROM pull_requests
         WHERE state IN ('merged', 'closed')

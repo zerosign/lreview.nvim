@@ -66,12 +66,8 @@ function M.list(cwd)
     return {}
   end
   local provider = canonical_provider(resolved)
-  local rows = storage.query([[
-    SELECT mo_id, provider, repo, number, title, state, url
-    FROM pull_requests
-    WHERE provider = ? AND repo = ?
-    ORDER BY number DESC
-  ]], provider, resolved.repo)
+  local pr_storage = require("lreview.storage.pull_request")
+  local rows = pr_storage.list(provider, resolved.repo)
   local out = {}
   for _, r in ipairs(rows or {}) do
     out[#out + 1] = {

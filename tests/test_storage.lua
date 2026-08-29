@@ -121,7 +121,11 @@ end
 -- Test comment update
 local updated_body = "Updated comment text line 1."
 comments.update_comment(comment1.c_id, updated_body)
-local updated_comment = storage.query("SELECT * FROM comments WHERE c_id = ?", comment1.c_id)[1]
+local updated_rows = comments.comments_for_thread(mock_thread.t_id)
+local updated_comment
+for _, c in ipairs(updated_rows) do
+  if c.c_id == comment1.c_id then updated_comment = c; break end
+end
 if not updated_comment or updated_comment.body ~= updated_body then
   print("FAIL: Comment update failed.")
   os.exit(1)

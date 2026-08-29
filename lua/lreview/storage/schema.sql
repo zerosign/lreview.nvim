@@ -6,49 +6,36 @@ CREATE TABLE IF NOT EXISTS pull_requests (
   repo          TEXT NOT NULL,
   number        INTEGER NOT NULL,
   title         TEXT,
-  author        TEXT,
   state         TEXT,
-  source_branch TEXT,
-  target_branch TEXT,
-  description   TEXT,
-  base_sha      TEXT,
-  head_sha      TEXT,
-  url           TEXT,
-  updated_at    TEXT
+  updated_at    TEXT,
+  payload       BLOB
 );
 
 CREATE INDEX IF NOT EXISTS idx_pr_provider_repo ON pull_requests(provider, repo);
-CREATE INDEX IF NOT EXISTS idx_pr_source_branch ON pull_requests(source_branch);
 
 CREATE TABLE IF NOT EXISTS threads (
   t_id           TEXT PRIMARY KEY,  -- local uuid or remote discussion id
   mo_id          TEXT NOT NULL,
-  path           TEXT,
-  commit_sha     TEXT,
-  start_line     INTEGER,
-  end_line       INTEGER,
-  is_draft       INTEGER NOT NULL DEFAULT 1,
-  last_synced_at TEXT,
-  resolved       INTEGER NOT NULL DEFAULT 0,
+  path           TEXT NOT NULL,
+  line_start     INTEGER NOT NULL,
+  line_end       INTEGER NOT NULL,
+  state          INTEGER NOT NULL DEFAULT 1, -- THREAD_STATE
+  payload        BLOB,
   FOREIGN KEY(mo_id) REFERENCES pull_requests(mo_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_threads_buffer ON threads(mo_id, path, start_line, end_line);
-CREATE INDEX IF NOT EXISTS idx_threads_draft ON threads(mo_id, is_draft);
+CREATE INDEX IF NOT EXISTS idx_threads_buffer ON threads(mo_id, path, line_start, line_end);
 
 CREATE TABLE IF NOT EXISTS comments (
   c_id        TEXT PRIMARY KEY,     -- local uuid OR remote id when synced
   t_id        TEXT NOT NULL,
   remote_id   TEXT,
-  author      TEXT,
-  body        TEXT,
-  created_at  TEXT,
-  in_reply_to TEXT,
-  state       INTEGER NOT NULL DEFAULT 1, -- mapped to STATE enum
+  state       INTEGER NOT NULL DEFAULT 1, -- COMMENT_STATE
+  payload     BLOB,
   FOREIGN KEY(t_id) REFERENCES threads(t_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_comments_thread ON comments(t_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_comments_thread ON comments(t_id);
 
 CREATE TABLE IF NOT EXISTS reviews (
   r_id         TEXT PRIMARY KEY,
@@ -63,8 +50,7 @@ CREATE TABLE IF NOT EXISTS repo_users (
   repo_key   TEXT NOT NULL,
   username   TEXT NOT NULL,
   name       TEXT,
-  avatar_url TEXT,
-  fetched_at TEXT,
+  payload    BLOB,
   PRIMARY KEY (repo_key, username)
 );
 

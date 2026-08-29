@@ -1,23 +1,55 @@
----@meta
-
 -- CRUD for the pull_requests table (MR/PR cache + detail).
+--
+-- Flat index columns (queried/indexed):
+--   title      -> FTS5 trigram search
+--   state      -> GC filter (merged/closed)
+--   updated_at -> GC date threshold
+--
+-- MessagePack payload (display-only metadata):
+--   author, source_branch, target_branch, description,
+--   base_sha, head_sha, url, remote_updated_at
 
 local storage = require("lreview.storage")
+local mpack = vim.mpack
 
 local M = {}
+
+local function decode_mr(row)
+  if not row then return nil end
+  local payload = row.payload and mpack.decode(row.payload) or {}
+  row.payload = nil
+  for k, v in pairs(payload) do
+    row[k] = v
+  end
+  return row
+end
 
 --- Upsert an MR (list row or detail) into the cache.
 ---@param mr lreview.MR|lreview.MRDetail
 function M.upsert(mr)
+  -- Flat indexed columns for fast SQL filtering and FTS5 search.
+  local title = mr.title
+  local state = mr.state
+  local updated_at = mr.updated_at
+
+  -- Everything else goes into the MessagePack payload.
+  local payload = {
+    author = mr.author,
+    source_branch = mr.source_branch,
+    target_branch = mr.target_branch,
+    description = mr.description,
+    base_sha = mr.base_sha,
+    head_sha = mr.head_sha,
+    url = mr.url,
+    remote_updated_at = mr.remote_updated_at or mr.updated_at,
+  }
+
   storage.execute([[
     INSERT OR REPLACE INTO pull_requests
-      (mo_id, provider, repo, number, title, author, state,
-       source_branch, target_branch, description, base_sha, head_sha, url, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  ]],
-    mr.mo_id, mr.provider, mr.repo, mr.number, mr.title, mr.author, mr.state,
-    mr.source_branch, mr.target_branch, mr.description, mr.base_sha, mr.head_sha,
-    mr.url, mr.updated_at)
+      (mo_id, provider, repo, number, title, state, updated_at, payload)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  ]], mr.mo_id, mr.provider, mr.repo, mr.number,
+      title, state, updated_at, mpack.encode(payload))
 end
 
 --- Get an MR by mo_id.
@@ -25,7 +57,7 @@ end
 ---@return table|nil
 function M.get(mo_id)
   local rows = storage.query("SELECT * FROM pull_requests WHERE mo_id = ?", mo_id)
-  return rows[1]
+  return decode_mr(rows[1])
 end
 
 --- List MRs for a provider+repo.
@@ -33,10 +65,14 @@ end
 ---@param repo string
 ---@return table[]
 function M.list(provider, repo)
-  return storage.query(
+  local rows = storage.query(
     "SELECT * FROM pull_requests WHERE provider = ? AND repo = ? ORDER BY number DESC",
     provider, repo
   )
+  for i, r in ipairs(rows) do
+    rows[i] = decode_mr(r)
+  end
+  return rows
 end
 
 --- Find an MR by source branch.
@@ -45,11 +81,13 @@ end
 ---@param branch string
 ---@return table|nil
 function M.by_source_branch(provider, repo, branch)
-  local rows = storage.query(
-    "SELECT * FROM pull_requests WHERE provider = ? AND repo = ? AND source_branch = ?",
-    provider, repo, branch
-  )
-  return rows[1]
+  local list = M.list(provider, repo)
+  for _, mr in ipairs(list) do
+    if mr.source_branch == branch then
+      return mr
+    end
+  end
+  return nil
 end
 
 --- Delete an MR and its dependent threads/comments/reviews.
@@ -69,64 +107,67 @@ local function fts_phrase(q)
 end
 
 --- Search cached MRs by number/title substring (case-insensitive) using the
---- FTS5 trigram index. Queries shorter than 3 chars fall back to LIKE.
+--- FTS5 trigram index on flat columns. Queries shorter than 3 chars fall back
+--- to Lua filtering.
 --- Ranking: title prefix > title substring > number prefix.
 ---@param provider string  -- canonical name ("gitlab" | "github")
 ---@param repo string
 ---@param query string|nil
----@return table[]  -- { mo_id, provider, repo, number, title, state, url }[]
+---@return table[]
 function M.search(provider, repo, query)
   if not query or query == "" then
     return M.list(provider, repo)
   end
   local q = query:lower()
   local rows
+
   if #q >= 3 then
+    -- FTS5 searches flat `title` and `number` columns directly.
     rows = storage.query([[
-      SELECT p.mo_id, p.provider, p.repo, p.number, p.title, p.state, p.url
+      SELECT p.*
       FROM pull_requests_fts f
       JOIN pull_requests p ON p.rowid = f.rowid
       WHERE pull_requests_fts MATCH ? AND p.provider = ? AND p.repo = ?
     ]], fts_phrase(q), provider, repo)
+    for i, r in ipairs(rows) do
+      rows[i] = decode_mr(r)
+    end
   else
-    rows = storage.query([[
-      SELECT mo_id, provider, repo, number, title, state, url FROM pull_requests
-      WHERE provider = ? AND repo = ? AND (CAST(number AS TEXT) LIKE ? OR title LIKE ?)
-    ]], provider, repo, "%" .. q .. "%", "%" .. q .. "%")
+    local all = M.list(provider, repo)
+    rows = {}
+    for _, mr in ipairs(all) do
+      if tostring(mr.number):find(q, 1, true)
+          or (mr.title and mr.title:lower():find(q, 1, true)) then
+        rows[#rows + 1] = mr
+      end
+    end
   end
+
   local scored = {}
-  for _, r in ipairs(rows or {}) do
-    local title = (r.title or ""):lower()
-    local num_str = tostring(r.number)
+  for _, mr in ipairs(rows or {}) do
+    local title = (mr.title or ""):lower()
+    local num_str = tostring(mr.number)
     local score
     if title:sub(1, #q) == q then
-      score = 0 -- title prefix
+      score = 0
     elseif title:find(q, 1, true) then
-      score = 1 -- title substring
+      score = 1
     elseif num_str:sub(1, #q) == q then
-      score = 2 -- number prefix
+      score = 2
     end
     if score then
-      scored[#scored + 1] = { row = r, score = score }
+      scored[#scored + 1] = { row = mr, score = score }
     end
   end
+
   table.sort(scored, function(a, b)
-    if a.score ~= b.score then
-      return a.score < b.score
-    end
+    if a.score ~= b.score then return a.score < b.score end
     return a.row.number > b.row.number
   end)
+
   local out = {}
   for _, s in ipairs(scored) do
-    out[#out + 1] = {
-      mo_id = s.row.mo_id,
-      provider = s.row.provider,
-      repo = s.row.repo,
-      number = s.row.number,
-      title = s.row.title,
-      state = s.row.state,
-      url = s.row.url,
-    }
+    out[#out + 1] = s.row
   end
   return out
 end
