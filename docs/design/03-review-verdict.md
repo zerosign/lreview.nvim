@@ -89,6 +89,13 @@ New self-contained module `lua/lreview/ui/confirm.lua`:
 
 The popup is **non-invasive** — it only appears at submit time.
 
+### 2.4 Summary Panel Short-Circuits (`A` / `R`)
+
+For rapid review workflows, the **Local Review Summary panel** exposes direct keybindings to trigger verdicts without leaving the summary window:
+
+- **`A` (Approve MR)**: Prompts confirmation and triggers an immediate MR approval call (checking `approve_mr` capability).
+- **`R` (Reject / Request Changes)**: Prompts confirmation and submits a `REQUEST_CHANGES` verdict (checking `review_verdict` capability).
+
 ---
 
 ## 3. Flow / Sequence

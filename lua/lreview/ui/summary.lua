@@ -104,7 +104,7 @@ function M.redraw()
 
     lines[#lines + 1] = ""
     lines[#lines + 1] = string.rep("─", 80)
-    lines[#lines + 1] = " [o/<CR>] Open File | [g] Switch to Threads View | [q] Close"
+    lines[#lines + 1] = " [o/<CR>] Open File | [A] Approve | [R] Reject | [g] Switch to Threads View | [q] Close"
   else
     lines[#lines + 1] = "=== Local Review Summary [Threads] ==="
     lines[#lines + 1] = "Filter: " .. (M.state.show_all and "[Showing All]" or "[Active & Drafts Only]") .. " (f: filter, g: toggle view, u: pull)"
@@ -140,7 +140,7 @@ function M.redraw()
 
     lines[#lines + 1] = ""
     lines[#lines + 1] = string.rep("─", 80)
-    lines[#lines + 1] = " [o/<CR>] Open Thread | [s/r] Resolve | [g] Switch to Files View | [q] Close"
+    lines[#lines + 1] = " [o/<CR>] Open Thread | [s/r] Resolve | [A] Approve | [R] Reject | [g] Switch to Files View | [q] Close"
   end
 
   M.state.threads_map = threads_map
@@ -323,6 +323,34 @@ local function handle_action(action)
         sync.schedule()
       end
     end)
+  elseif action == "approve" then
+    local adapter = require("lreview.adapter")
+    local resolved = adapter.resolve(review.current and review.current.cwd)
+    if not adapter.supports(resolved, "approve_mr") then
+      vim.notify("lreview: approve MR capability is not supported by active adapter", vim.log.levels.WARN)
+      return
+    end
+    local ok, err = review.approve_review()
+    if not ok then
+      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+    else
+      vim.notify("lreview: MR approved successfully", vim.log.levels.INFO)
+      sync.schedule()
+    end
+  elseif action == "reject" then
+    local adapter = require("lreview.adapter")
+    local resolved = adapter.resolve(review.current and review.current.cwd)
+    if not adapter.supports(resolved, "review_verdict") then
+      vim.notify("lreview: review verdict capability is not supported by active adapter", vim.log.levels.WARN)
+      return
+    end
+    vim.notify("lreview: submitting request changes verdict...", vim.log.levels.INFO)
+    local count, err = review.submit_review()
+    if err then
+      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+    else
+      sync.schedule()
+    end
   end
 end
 
@@ -370,6 +398,8 @@ function M.open()
   vim.keymap.set("n", "f", function() M.toggle_filter() end, opts)
   vim.keymap.set("n", "g", function() M.toggle_view_mode() end, opts)
   vim.keymap.set("n", "S", function() M.cycle_sort_mode() end, opts)
+  vim.keymap.set("n", "A", function() handle_action("approve") end, opts)
+  vim.keymap.set("n", "R", function() handle_action("reject") end, opts)
 
   local ui_cfg = config.get_defaults().ui or {}
   local layout = ui_cfg.layout or "split"

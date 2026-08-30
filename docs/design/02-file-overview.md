@@ -91,7 +91,9 @@ wide, column-aligned table makes the diff scope legible at a glance.
 
 - `g` (or a configurable key) toggles between **threads** and **files** views.
 - `f` keeps its current meaning (toggle resolved-filter) — applies to both views.
-- `s` cycles the sort order in the files view.
+- `S` cycles the sort order in the files view.
+- `A` short-circuit to **Approve the MR** directly from the summary panel (checks `approve_mr` capability).
+- `R` short-circuit to **Reject / Request Changes on the MR** directly from the summary panel (checks `review_verdict` capability).
 
 ---
 
