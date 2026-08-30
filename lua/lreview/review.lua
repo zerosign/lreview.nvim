@@ -722,6 +722,10 @@ function M.close_review(number)
   if not ok then
     return false, err
   end
+  local pull_request_storage = require("lreview.storage.pull_request")
+  if detail and detail.mo_id then
+    pull_request_storage.update_state(detail.mo_id, "closed")
+  end
   return true, nil
 end
 
@@ -745,6 +749,10 @@ function M.approve_review(number)
   local ok, err = resolved.adapter.approve_mr(resolved.cfg, ctx, num)
   if not ok then
     return false, err
+  end
+  local pull_request_storage = require("lreview.storage.pull_request")
+  if detail and detail.mo_id then
+    pull_request_storage.update_state(detail.mo_id, "approved")
   end
   return true, nil
 end

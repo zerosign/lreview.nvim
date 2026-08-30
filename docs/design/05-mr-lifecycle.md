@@ -98,6 +98,23 @@ are genuinely environmental and can't be known from the adapter code alone:
 | `approve_mr` | Whether the **current user** has permission to approve | Permission is per-user/per-role, not per-adapter |
 | `list_templates` | Whether the repo has templates configured | Repos without a `.github/PULL_REQUEST_TEMPLATE` or GitLab template dir return none |
 
+### 2.5 Local Database State Persistence (`pull_requests.state`)
+
+When an MR lifecycle state transition completes successfully on the remote platform (`approve_mr`, `close_mr`, or `create_mr`), the plugin immediately persists the state change to the local SQLite database:
+
+```lua
+-- storage/pull_request.lua
+function M.update_state(mo_id, new_state)
+  storage.execute("UPDATE pull_requests SET state = ? WHERE mo_id = ?", new_state, mo_id)
+end
+```
+
+- **On Approval (`approve_review`)**: Updates `pull_requests.state = "approved"` in SQLite.
+- **On Close (`close_review`)**: Updates `pull_requests.state = "closed"` in SQLite.
+- **UI Propagation**: Triggers `sync.schedule()` to flush the debounced Sync Bus and redraw all open UI panels (`summary.lua`, `decor.lua`) with the updated state.
+
+---
+
 A static `capabilities.draft_mr = true` on the GitHub adapter is *wrong* for a
 repo that has drafts disabled. Only a probe of that specific repo can tell.
 

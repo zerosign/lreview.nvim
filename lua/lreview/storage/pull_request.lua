@@ -52,6 +52,13 @@ function M.upsert(mr)
       title, state, updated_at, mpack.encode(payload))
 end
 
+--- Update state column for an existing MR/PR record in SQLite.
+---@param mo_id string
+---@param new_state string  -- e.g. "approved", "closed", "merged"
+function M.update_state(mo_id, new_state)
+  storage.execute("UPDATE pull_requests SET state = ? WHERE mo_id = ?", new_state, mo_id)
+end
+
 --- Get an MR by mo_id.
 ---@param mo_id string
 ---@return table|nil
