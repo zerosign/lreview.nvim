@@ -413,7 +413,8 @@ function M.open()
 
   if layout == "split" or layout == "vsplit" then
     local split_pos = ui_cfg.split and ui_cfg.split.position or "botright"
-    local split_size = ui_cfg.split and ui_cfg.split.size or 15
+    local default_size = (layout == "vsplit") and 60 or 15
+    local split_size = (ui_cfg.split and ui_cfg.split.size) and ui_cfg.split.size or default_size
     local split_cmd = (layout == "vsplit") and "vnew" or "new"
 
     vim.cmd(string.format("silent %s %d%s", split_pos, split_size, split_cmd))

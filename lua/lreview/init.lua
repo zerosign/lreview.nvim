@@ -395,6 +395,30 @@ local function cmd_request_review(args)
   end)
 end
 
+local function cmd_branch(args)
+  local cwd = vim.fn.getcwd()
+  local branch_name = args.args ~= "" and args.args or vim.fn.input("Branch name: ")
+  if branch_name == "" then return end
+
+  local cfg = config.get_defaults()
+  local res_branch, err = materialize.materialize_branch(cfg, cwd, branch_name)
+  if not res_branch then
+    vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+  else
+    vim.notify("lreview: materialized branch '" .. res_branch .. "'", vim.log.levels.INFO)
+  end
+end
+
+local function cmd_start()
+  local cwd = vim.fn.getcwd()
+  local detail, err = review.init_session(cwd)
+  if not detail then
+    vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+    return
+  end
+  vim.notify("lreview: review started for MR #" .. detail.number .. " (" .. detail.title .. ")", vim.log.levels.INFO)
+end
+
 -- ---------------------------------------------------------------------------
 -- Public Commands Registration (Complexity = 1)
 -- ---------------------------------------------------------------------------
@@ -408,7 +432,9 @@ function M.register_commands()
   })
 
   api.nvim_create_user_command("LocalReviewDetail", cmd_detail, { nargs = "?" })
+  api.nvim_create_user_command("LocalReviewStart", cmd_start, {})
   api.nvim_create_user_command("LocalReviewCreate", cmd_create, {})
+  api.nvim_create_user_command("LocalReviewBranch", cmd_branch, { nargs = "?" })
   api.nvim_create_user_command("LocalReviewComment", cmd_comment, { range = true })
   api.nvim_create_user_command("LocalReviewSubmit", cmd_submit, {})
   api.nvim_create_user_command("LocalReviewPull", cmd_pull, {})

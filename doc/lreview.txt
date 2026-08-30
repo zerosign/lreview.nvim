@@ -141,6 +141,10 @@ USER COMMANDS                                             *lreview-commands*
                       Launches an interactive picker flow to select target branch
                       and template, and inputs a title to create a remote MR/PR.
 
+`:LocalReviewBranch` [<name>]
+                      Creates and materializes a new review branch/worktree based on
+                      the configured repository topology strategy.
+
 `:LocalReviewComment`
                       Adds a local draft comment on the current visually
                       selected line range. Requires an active review.
