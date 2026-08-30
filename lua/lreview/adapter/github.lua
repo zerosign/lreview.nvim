@@ -15,6 +15,20 @@ local M = {}
 M.name = "github"
 M.provider = "gh"
 
+M.capabilities = {
+  review_verdict   = true,
+  draft_mr         = true,
+  update_mr        = true,
+  close_mr         = true,
+  approve_mr       = true,
+  list_templates   = true,
+  inline_comments  = true,
+  resolve_threads  = true,
+  batch_submit     = true,
+  assign_reviewers = true,
+  offline_staging  = true,
+}
+
 --- Resolve an op value (string template or fn) into an argv list.
 ---@param cfg table  -- merged per-domain config
 ---@param op string  -- op name

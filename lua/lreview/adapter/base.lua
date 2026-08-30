@@ -8,6 +8,20 @@
 
 local M = {}
 
+M.default_capabilities = {
+  review_verdict   = false,
+  draft_mr         = false,
+  update_mr        = true,
+  close_mr         = true,
+  approve_mr       = false,
+  list_templates   = false,
+  inline_comments  = true,
+  resolve_threads  = true,
+  batch_submit     = true,
+  assign_reviewers = false,
+  offline_staging  = true,
+}
+
 ---@class lreview.CliResult
 ---@field ok boolean
 ---@field stdout string

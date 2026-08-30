@@ -79,4 +79,24 @@ function M.ctx(resolved, ref)
   }
 end
 
+--- Query whether a resolved adapter context supports a specific capability.
+--- Merges adapter-declared capabilities over base.default_capabilities.
+---@param resolved table|nil  -- resolved adapter context from M.resolve()
+---@param cap_name string     -- capability name e.g. "review_verdict", "draft_mr"
+---@return boolean
+function M.supports(resolved, cap_name)
+  if not resolved or not resolved.adapter then
+    return false
+  end
+  local base = require("lreview.adapter.base")
+  local caps = resolved.adapter.capabilities or {}
+  if caps[cap_name] ~= nil then
+    return caps[cap_name] == true
+  end
+  if base.default_capabilities and base.default_capabilities[cap_name] ~= nil then
+    return base.default_capabilities[cap_name] == true
+  end
+  return false
+end
+
 return M

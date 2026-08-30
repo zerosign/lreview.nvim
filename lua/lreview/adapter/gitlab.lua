@@ -15,6 +15,20 @@ local M = {}
 M.name = "gitlab"
 M.provider = "glab"
 
+M.capabilities = {
+  review_verdict   = true,
+  draft_mr         = true,
+  update_mr        = true,
+  close_mr         = true,
+  approve_mr       = true,
+  list_templates   = true,
+  inline_comments  = true,
+  resolve_threads  = true,
+  batch_submit     = true,
+  assign_reviewers = true,
+  offline_staging  = true,
+}
+
 --- Build the base argv with optional --repo.
 ---@param cfg table
 ---@param ctx table
