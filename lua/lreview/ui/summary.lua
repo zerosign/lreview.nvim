@@ -42,80 +42,109 @@ function M.redraw()
   local root = git.root(review.current.cwd)
   if not root then return end
 
-  local threads = comments.threads_for_mr(mo_id)
   local lines = {}
   local threads_map = {}
+  local files_map = {}
 
-  lines[#lines + 1] = "=== Local Review Summary ==="
-  lines[#lines + 1] = "Filter: " .. (M.state.show_all and "[Showing All]" or "[Active & Drafts Only]") .. " (f: toggle filter, u: pull/sync)"
-  lines[#lines + 1] = ""
-  lines[#lines + 1] = string.format(" %-12s %-12s %-25s %s", "Status", "Author", "Location", "Preview")
-  lines[#lines + 1] = string.rep("─", 80)
+  M.state.view_mode = M.state.view_mode or "threads"
+  M.state.sort_mode = M.state.sort_mode or "path"
 
-  local count = 0
-  for _, t in ipairs(threads) do
-    local is_resolved = comments.thread_is_resolved(t.state)
-    if M.state.show_all or not is_resolved then
-      local cs = comments.comments_for_thread(t.t_id)
-      if #cs > 0 then
-        count = count + 1
-        local first = cs[1]
-        local author = first.author or "me"
-        local body = first.body:gsub("[\r\n]+", " ")
-        if #body > 40 then
-          body = body:sub(1, 37) .. "..."
+  if M.state.view_mode == "files" then
+    lines[#lines + 1] = "=== Local Review Summary [Files] ==="
+    lines[#lines + 1] = string.format("Filter: %s | Sort: [%s] (f: filter, g: toggle view, S: cycle sort)",
+      M.state.show_all and "[Showing All]" or "[Active & Drafts Only]", M.state.sort_mode)
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = string.format(" %-10s %-8s %-8s %s", "Status", "+Adds", "-Dels", "Path")
+    lines[#lines + 1] = string.rep("─", 80)
+
+    local mr_files = review.current.detail.files or {}
+    local file_rows = {}
+    for _, f in ipairs(mr_files) do
+      local path = f.path or f.filename or f.old_path or ""
+      local adds = f.additions or f.adds or 0
+      local dels = f.deletions or f.dels or 0
+      local file_comments = comments.comments_for_buffer(mo_id, path)
+
+      local total_comments = #file_comments
+      local status = "[✔ Clean]"
+      if total_comments > 0 then
+        status = string.format("[💬 %d]", total_comments)
+      end
+
+      file_rows[#file_rows + 1] = {
+        path = path,
+        adds = adds,
+        dels = dels,
+        comments_count = total_comments,
+        status = status,
+      }
+    end
+
+    -- Sort file rows
+    table.sort(file_rows, function(a, b)
+      if M.state.sort_mode == "comments" then
+        return a.comments_count > b.comments_count
+      elseif M.state.sort_mode == "additions" then
+        return a.adds > b.adds
+      elseif M.state.sort_mode == "deletions" then
+        return a.dels > b.dels
+      else
+        return a.path < b.path
+      end
+    end)
+
+    for _, fr in ipairs(file_rows) do
+      lines[#lines + 1] = string.format(" %-10s %-8s %-8s %s", fr.status, "+" .. fr.adds, "-" .. fr.dels, fr.path)
+      files_map[#lines] = fr
+    end
+
+    if #file_rows == 0 then
+      lines[#lines + 1] = "  No file changes found."
+    end
+
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = string.rep("─", 80)
+    lines[#lines + 1] = " [o/<CR>] Open File | [g] Switch to Threads View | [q] Close"
+  else
+    lines[#lines + 1] = "=== Local Review Summary [Threads] ==="
+    lines[#lines + 1] = "Filter: " .. (M.state.show_all and "[Showing All]" or "[Active & Drafts Only]") .. " (f: filter, g: toggle view, u: pull)"
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = string.format(" %-12s %-12s %-25s %s", "Status", "Author", "Location", "Preview")
+    lines[#lines + 1] = string.rep("─", 80)
+
+    local threads = comments.threads_for_mr(mo_id)
+    local count = 0
+    for _, t in ipairs(threads) do
+      local is_resolved = comments.thread_is_resolved(t.state)
+      if M.state.show_all or not is_resolved then
+        local cs = comments.comments_for_thread(t.t_id)
+        if #cs > 0 then
+          count = count + 1
+          local first = cs[1]
+          local author = first.author or "me"
+          local body = first.body:gsub("[\r\n]+", " "):sub(1, 37)
+          local status = is_resolved and "[✔ Resolved]" or (comments.thread_is_draft(t.state) and "[💬 Draft]" or "[● Active]")
+
+          local loc = string.format("%s:%d", t.path, t.start_line)
+          if #loc > 24 then loc = "..." .. loc:sub(-21) end
+
+          lines[#lines + 1] = string.format(" %-12s %-12s %-25s %s", status, author, loc, body)
+          threads_map[#lines] = t
         end
-
-        local status = "[● Active]"
-        if is_resolved then
-          status = "[✔ Resolved]"
-        elseif comments.thread_is_draft(t.state) then
-          status = "[💬 Draft]"
-        end
-
-        -- check for pending edits or deletions or conflicts in the thread comments
-        local has_edit = false
-        local has_del = false
-        local has_conflict = false
-        for _, c in ipairs(cs) do
-          if c.state == comments.STATE.MODIFIED then
-            has_edit = true
-          elseif c.state == comments.STATE.DELETED then
-            has_del = true
-          elseif c.state == comments.STATE.CONFLICT then
-            has_conflict = true
-          end
-        end
-
-        if has_conflict then
-          status = "[⚠ Conflict]"
-        elseif has_del then
-          status = "[⇡ Deleted]"
-        elseif has_edit then
-          status = "[⇡ Modified]"
-        end
-
-        local loc = string.format("%s:%d", t.path, t.start_line)
-        if #loc > 24 then
-          loc = "..." .. loc:sub(-21)
-        end
-
-        lines[#lines + 1] = string.format(" %-12s %-12s %-25s %s", status, author, loc, body)
-        threads_map[#lines] = t
       end
     end
-  end
 
-  if count == 0 then
-    lines[#lines + 1] = "  No discussions found."
-  end
+    if count == 0 then
+      lines[#lines + 1] = "  No discussions found."
+    end
 
-  lines[#lines + 1] = ""
-  lines[#lines + 1] = string.rep("─", 80)
-  lines[#lines + 1] = " [o/<CR>] Jump/Open Thread | [s/r] Resolve/Reopen | [d] Delete Draft"
-  lines[#lines + 1] = " [p] Push Selected         | [P] Push All         | [q] Close"
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = string.rep("─", 80)
+    lines[#lines + 1] = " [o/<CR>] Open Thread | [s/r] Resolve | [g] Switch to Files View | [q] Close"
+  end
 
   M.state.threads_map = threads_map
+  M.state.files_map = files_map
 
   vim.bo[M.state.bufnr].modifiable = true
   vim.api.nvim_buf_set_lines(M.state.bufnr, 0, -1, false, lines)
@@ -125,10 +154,10 @@ function M.redraw()
   vim.api.nvim_buf_clear_namespace(M.state.bufnr, ns, 0, -1)
 
   -- Highlight header lines (0-indexed in API)
-  vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, "LReviewSummaryHeader", 0, 0, -1)
-  vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, "Comment", 1, 0, -1)
-  vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, "LReviewSummaryHeader", 3, 0, -1)
-  vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, "Comment", 4, 0, -1)
+  pcall(vim.api.nvim_buf_add_highlight, M.state.bufnr, ns, "LReviewSummaryHeader", 0, 0, -1)
+  pcall(vim.api.nvim_buf_add_highlight, M.state.bufnr, ns, "Comment", 1, 0, -1)
+  pcall(vim.api.nvim_buf_add_highlight, M.state.bufnr, ns, "LReviewSummaryHeader", 3, 0, -1)
+  pcall(vim.api.nvim_buf_add_highlight, M.state.bufnr, ns, "Comment", 4, 0, -1)
 
   -- Highlight each mapped thread line
   for line_idx, t in pairs(threads_map) do
@@ -158,17 +187,36 @@ function M.redraw()
       hl_group = "LReviewSummaryDraft"
     end
 
-    -- Highlight status column (index 1 to 13)
-    vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, hl_group, line_idx - 1, 1, 13)
-    -- Highlight location column (index 27 to 52)
-    vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, "LReviewSummaryLocation", line_idx - 1, 27, 52)
+    pcall(vim.api.nvim_buf_add_highlight, M.state.bufnr, ns, hl_group, line_idx - 1, 1, 13)
+    pcall(vim.api.nvim_buf_add_highlight, M.state.bufnr, ns, "LReviewSummaryLocation", line_idx - 1, 27, 52)
   end
 
   local total_lines = #lines
   if total_lines >= 4 then
-    vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, "Comment", total_lines - 3, 0, -1)
-    vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, "Comment", total_lines - 2, 0, -1)
-    vim.api.nvim_buf_add_highlight(M.state.bufnr, ns, "Comment", total_lines - 1, 0, -1)
+    pcall(vim.api.nvim_buf_add_highlight, M.state.bufnr, ns, "Comment", total_lines - 3, 0, -1)
+    pcall(vim.api.nvim_buf_add_highlight, M.state.bufnr, ns, "Comment", total_lines - 2, 0, -1)
+    pcall(vim.api.nvim_buf_add_highlight, M.state.bufnr, ns, "Comment", total_lines - 1, 0, -1)
+  end
+end
+
+function M.toggle_view_mode()
+  if M.state then
+    M.state.view_mode = (M.state.view_mode == "files") and "threads" or "files"
+    M.redraw()
+  end
+end
+
+function M.cycle_sort_mode()
+  if M.state then
+    local modes = { "path", "comments", "additions", "deletions" }
+    local current = M.state.sort_mode or "path"
+    for i, m in ipairs(modes) do
+      if m == current then
+        M.state.sort_mode = modes[(i % #modes) + 1]
+        break
+      end
+    end
+    M.redraw()
   end
 end
 
@@ -205,10 +253,24 @@ end)
 local function handle_action(action)
   if not M.state then return end
   local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+
+  if M.state.view_mode == "files" and action == "open" then
+    local f_item = M.state.files_map[cursor_line]
+    if not f_item then
+      vim.notify("lreview: move cursor onto a file row to open", vim.log.levels.WARN)
+      return
+    end
+    M.close()
+    local root = git.root(review.current.cwd)
+    if not root then return end
+    vim.cmd("edit " .. root .. "/" .. f_item.path)
+    return
+  end
+
   local thread = M.state.threads_map[cursor_line]
 
   if not thread and action ~= "push_all" and action ~= "pull" then
-    vim.notify("lreview: move cursor onto a discussion row to perform action", vim.log.levels.WARN)
+    vim.notify("lreview: move cursor onto a discussion or file row to perform action", vim.log.levels.WARN)
     return
   end
 
@@ -306,6 +368,8 @@ function M.open()
   vim.keymap.set("n", "P", function() handle_action("push_all") end, opts)
   vim.keymap.set("n", "u", function() handle_action("pull") end, opts)
   vim.keymap.set("n", "f", function() M.toggle_filter() end, opts)
+  vim.keymap.set("n", "g", function() M.toggle_view_mode() end, opts)
+  vim.keymap.set("n", "S", function() M.cycle_sort_mode() end, opts)
 
   local ui_cfg = config.get_defaults().ui or {}
   local layout = ui_cfg.layout or "split"
