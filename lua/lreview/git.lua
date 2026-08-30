@@ -218,6 +218,31 @@ function M.create_branch(cwd, name)
   return true, nil
 end
 
+--- Checkout an existing branch.
+---@param name string
+---@param cwd string|nil
+---@return boolean ok, string|nil err
+function M.checkout_branch(name, cwd)
+  local out, err = git({ "checkout", name }, cwd)
+  if not out then
+    return false, err
+  end
+  return true, nil
+end
+
+--- Add a git worktree for a branch.
+---@param target_dir string
+---@param branch string
+---@param cwd string|nil
+---@return boolean ok, string|nil err
+function M.create_worktree(target_dir, branch, cwd)
+  local out, err = git({ "worktree", "add", target_dir, branch }, cwd)
+  if not out then
+    return false, err
+  end
+  return true, nil
+end
+
 --- Get the line numbers of added/modified lines in the current branch relative to the target branch.
 ---@param target_branch string
 ---@param rel_path string
