@@ -71,7 +71,8 @@ local function base_argv(cfg, ctx)
   end
   if ctx.repo then
     argv[#argv + 1] = "--repo"
-    argv[#argv + 1] = ctx.repo
+    local full_repo = (ctx.owner and ctx.owner ~= "" and not ctx.repo:find("/")) and (ctx.owner .. "/" .. ctx.repo) or ctx.repo
+    argv[#argv + 1] = full_repo
   end
   return argv
 end
@@ -214,7 +215,11 @@ function M.fetch_inline_comments(cfg, ctx, number)
 end
 
 function M.fetch_threads(cfg, ctx, number, mo_id)
-  local owner, repo_name = ctx.repo:match("^([^/]+)/(.+)$")
+  local owner = ctx.owner
+  local repo_name = ctx.repo
+  if ctx.repo and ctx.repo:find("/") then
+    owner, repo_name = ctx.repo:match("^([^/]+)/(.+)$")
+  end
   if not owner or not repo_name then
     return nil, "invalid repository path: " .. tostring(ctx.repo)
   end
