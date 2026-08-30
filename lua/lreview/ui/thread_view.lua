@@ -89,6 +89,10 @@ local function format_threads_for_line(mo_id, rel_path, line)
   add_line(" [r] Reply  |  [e] Edit Draft  |  [d] Delete Draft  |  [q] Close")
   add_line(" [s] Toggle Thread Resolve State  |  [P] Submit Review")
 
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "───────────────────────────────────────────────────────────"
+  lines[#lines + 1] = " [r] Reply | [e] Edit | [d] Delete | [s] Resolve | [P] Push | [q] Close"
+
   return lines, line_map, thread_line_map
 end
 
@@ -307,7 +311,8 @@ function M.show(bufnr, rel_path, line)
 
   if layout == "split" or layout == "vsplit" then
     local split_pos = ui_cfg.split and ui_cfg.split.position or "botright"
-    local split_size = ui_cfg.split and ui_cfg.split.size or 15
+    local default_size = (layout == "vsplit") and 50 or 15
+    local split_size = (ui_cfg.split and ui_cfg.split.size) and ui_cfg.split.size or default_size
     local split_cmd = (layout == "vsplit") and "vnew" or "new"
 
     vim.cmd(string.format("silent %s %d%s", split_pos, split_size, split_cmd))
