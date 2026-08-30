@@ -49,13 +49,16 @@ function M.redraw()
   M.state.view_mode = M.state.view_mode or "threads"
   M.state.sort_mode = M.state.sort_mode or "path"
 
+  local win_w = (M.state and M.state.winid and vim.api.nvim_win_is_valid(M.state.winid)) and vim.api.nvim_win_get_width(M.state.winid) or 100
+  if win_w < 80 then win_w = 80 end
+
   if M.state.view_mode == "files" then
     lines[#lines + 1] = "=== Local Review Summary [Files] ==="
     lines[#lines + 1] = string.format("Filter: %s | Sort: [%s] (f: filter, g: toggle view, S: cycle sort)",
       M.state.show_all and "[Showing All]" or "[Active & Drafts Only]", M.state.sort_mode)
     lines[#lines + 1] = ""
-    lines[#lines + 1] = string.format(" %-10s %-8s %-8s %s", "Status", "+Adds", "-Dels", "Path")
-    lines[#lines + 1] = string.rep("─", 80)
+    lines[#lines + 1] = string.format(" %-12s %-8s %-8s %s", "Status", "+Adds", "-Dels", "Path")
+    lines[#lines + 1] = string.rep("─", win_w)
 
     local mr_files = review.current.detail.files or {}
     local file_rows = {}
@@ -93,9 +96,9 @@ function M.redraw()
       end
     end)
 
-    for _, fr in ipairs(file_rows) do
-      lines[#lines + 1] = string.format(" %-10s %-8s %-8s %s", fr.status, "+" .. fr.adds, "-" .. fr.dels, fr.path)
-      files_map[#lines] = fr
+    for _, row in ipairs(file_rows) do
+      lines[#lines + 1] = string.format(" %-12s +%-7d -%-7d %s", row.status, row.adds, row.dels, row.path)
+      files_map[#lines] = row
     end
 
     if #file_rows == 0 then
@@ -103,7 +106,7 @@ function M.redraw()
     end
 
     lines[#lines + 1] = ""
-    lines[#lines + 1] = string.rep("─", 80)
+    lines[#lines + 1] = string.rep("─", win_w)
     lines[#lines + 1] = " [o/<CR>] Open File | [A] Approve | [R] Reject | [g] Switch to Threads View | [q] Close"
   else
     lines[#lines + 1] = "=== Local Review Summary [Threads] ==="
