@@ -4,19 +4,20 @@
 INTRODUCTION                                                 *lreview-intro*
 
 |lreview.nvim| is a fast, asynchronous code review plugin for Neovim that 
-unifies review operations across GitHub, GitLab, and other code hosts. It 
+unifies review operations across GitHub, GitLab, and custom code hosts. It 
 leverages local SQLite caching for sub-millisecond thread loading and offloads
-all remote networking to background asynchronous CLI execution.
+networking and sync operations to isolated libuv background worker threads.
 
 Main Features:
-- Asynchronous non-blocking background pulls.
-- Offline-first cache: loads thread lists instantly via SQLite WAL.
-- Soft-deletion: handles deleted remote comments gracefully without breaking
-  nested reply threads.
-- Auto-Garbage Collection: automatically purges old closed or merged reviews on
-  startup, strictly protecting your local drafts.
-- Multi-repository awareness: resolves context dynamically, allowing multiple
-  forks and project reviews to coexist in the same database without conflicts.
+- Asynchronous worker threads (`uv.new_work`) with MessagePack serialization.
+- Centralized debounced Sync Bus (~80ms coalescing) and in-memory diff cache.
+- Idempotent submit state machine with `IN_FLIGHT` transient states and atomic
+  SQLite transactions.
+- Adapter capability system for safe multiplatform feature queries.
+- Repo topology-aware materialization (`checkout` vs `worktree`).
+- Summary panel with dual view modes (Threads & Files table) and verdict
+  short-circuits (`A` to approve, `R` to reject).
+- Floating verdict confirmation popup window.
 
 ==============================================================================
 INSTALLATION                                          *lreview-installation*
@@ -32,6 +33,7 @@ Using |lazy.nvim|:
       opts = {
         defaults = {
           db_path = vim.fn.stdpath("data") .. "/lreview/lreview.db",
+          topology = "simple", -- "simple" | "monorepo-single" | "monorepo-multi"
           db = {
             busy_timeout_ms = 5000,
             keep_days = 30,
@@ -58,7 +60,7 @@ Using |lazy.nvim|:
   })
 <
 
-=============================================================================
+==============================================================================
 CONFIGURATION                                        *lreview-configuration*
 
 The plugin is configured by passing an options table to `setup()`:
@@ -72,6 +74,11 @@ Inside the `defaults` block of your configuration:
   `db_path`           (string)
                       Absolute path to the SQLite cache file.
                       Default: `vim.fn.stdpath("data") .. "/lreview/lreview.db"`
+
+  `topology`          (string)
+                      Repository topology classification for branch materialization.
+                      Options: `"simple"`, `"monorepo-single"`, `"monorepo-multi"`.
+                      Default: `"simple"`
 
   `db.busy_timeout_ms` (number)
                       SQLite busy lock timeout in milliseconds.
@@ -123,9 +130,8 @@ USER COMMANDS                                             *lreview-commands*
 
 `:LocalReviewDetail` [<ref>]
                       Opens the markdown-formatted detail buffer editor for an
-                      MR/PR (defaults to the active review's MR, or checks the
-                      current branch). Supports direct saves (:w) to update titles
-                      and descriptions on the remote platform.
+                      MR/PR. Supports direct saves (:w) to update titles and
+                      descriptions on the remote platform.
 
 `:LocalReviewStart`
                       Resolves the repository target MR, initializes database
@@ -140,20 +146,20 @@ USER COMMANDS                                             *lreview-commands*
                       selected line range. Requires an active review.
 
 `:LocalReviewSubmit`
-                      Pushes all local draft inline comments as a unified review
-                      to the remote platform.
+                      Launches the floating confirmation popup window to push
+                      local draft inline comments and review verdicts.
 
 `:LocalReviewPull`
-                      Manually triggers an asynchronous remote pull to update
-                      comments and threads for the active review.
+                      Triggers an asynchronous worker thread pull (`uv.new_work`)
+                      to update comments and threads for the active review.
 
 `:LocalReviewClose` [<number>]
-                      Closes the MR/PR on the remote platform. Defaults to
-                      the active review's MR.
+                      Closes the MR/PR on the remote platform and updates the
+                      local SQLite database state to "closed".
 
 `:LocalReviewApprove` [<number>]
-                      Approves the MR/PR on the remote platform. Defaults to
-                      the active review's MR.
+                      Approves the MR/PR on the remote platform and updates the
+                      local SQLite database state to "approved".
 
 `:LocalReviewToggle`
                       Toggles inline annotations (signs & virtual text) on or off
@@ -164,117 +170,107 @@ USER COMMANDS                                             *lreview-commands*
                       discussion thread under the cursor line.
 
 `:LocalReviewSummary`
-                      Opens the interactive review summary panel. Lists all active
-                      and resolved threads in a split view with options to jump,
-                      resolve, sync, delete draft threads, or push changes.
+                      Opens the interactive review summary panel. Supports dual
+                      view modes (Threads & Files table), jump, resolve, filter,
+                      sort, and direct approve/reject short-circuits.
 
 `:LocalReviewNext`
-                      Jumps to the next discussion thread in the active buffer
-                      and automatically pops open the thread details.
+                      Jumps to the next discussion thread in the active buffer.
 
 `:LocalReviewPrev`
-                      Jumps to the previous discussion thread in the active buffer
-                      and automatically pops open the thread details.
+                      Jumps to the previous discussion thread in the active buffer.
 
 ==============================================================================
-THREAD VIEW & PANEL KEYBINDINGS                         *lreview-keybindings*
+SUMMARY PANEL KEYBINDINGS                               *lreview-summary-panel*
 
-When viewing discussion threads, Neovim displays all threads for the active line
-sequentially in a split buffer. Key actions are cursor-aware:
+The summary panel (`:LocalReviewSummary`) provides a dual-view inspection tool:
+
+  `g`                 Toggle View Mode: switches between **Threads** view and
+                      **Files** table view.
+  `f`                 Toggle Filter: toggles between active/drafts and all threads.
+  `S`                 Cycle Sort Mode: cycles sorting in Files view (`path`,
+                      `comments`, `additions`, `deletions`).
+  `o` / `<CR>`        Jump / Open: opens selected thread or file at cursor.
+  `s` / `r`           Resolve / Reopen: toggles thread resolved state.
+  `d`                 Delete Draft: deletes local draft thread under cursor.
+  `p`                 Push Selected: submits selected thread changes.
+  `P`                 Push All: submits all pending review changes.
+  `u`                 Pull Updates: triggers background async pull job.
+  `A`                 Approve MR: short-circuit to approve active MR.
+  `R`                 Reject MR: short-circuit to submit request changes verdict.
+  `q`                 Close: closes summary panel window.
+
+==============================================================================
+THREAD VIEW KEYBINDINGS                                 *lreview-keybindings*
+
+When viewing discussion threads (`:LocalReviewHover`), Neovim displays all threads
+for the active line sequentially in a split buffer:
 
   `r`                 Reply: opens a reply window for the selected thread.
   `e`                 Edit: edit an existing local draft comment.
   `d`                 Delete: delete a local draft comment/reply.
-  `s`                 Resolve/Reopen: toggles the resolved status of the thread
-                      under the cursor.
+  `s`                 Resolve/Reopen: toggles the resolved status of the thread.
   `P`                 Submit: push all local review comments.
   `q`                 Close: closes the thread view panel.
 
 ==============================================================================
-CUSTOM ADAPTERS                                            *lreview-custom-adapters*
+ADAPTER CAPABILITY SYSTEM                             *lreview-capabilities*
 
-lreview.nvim supports custom platform adapters (e.g. Gitea, Sourcehut, or internal
-code hosts) without editing plugin files. You define a Lua module in your runtime
-path (e.g. `lua/my_adapters/gitea.lua`) and specify its path in `opts`.
+Each platform adapter declares its feature capabilities in a `capabilities` table:
 
-An adapter module must return a table implementing these standard methods:
+  `review_verdict`   (boolean) Verdict support (Approve / Request Changes).
+  `draft_mr`         (boolean) Draft MR creation support.
+  `update_mr`        (boolean) MR title/description edit support.
+  `close_mr`         (boolean) MR closure support.
+  `approve_mr`       (boolean) Direct MR approval support.
+  `list_templates`   (boolean) MR template listing support.
+  `inline_comments`  (boolean) Line-level inline comment support.
+  `resolve_threads`  (boolean) Thread resolution support.
+  `batch_submit`     (boolean) Batch inline review submission support.
 
-  `query(cfg, scope, ctx)`
-                      Returns a list of PR/MR model maps.
-  `get_mr(cfg, ctx)`
-                      Returns detailed metadata for a single PR/MR.
-  `fetch_comments(cfg, ctx, last_sync)`
-                      Returns list of comments and threads from host.
-  `create_comment(cfg, ctx, path, line, body)`
-                      Creates a new remote inline comment thread.
-  `create_reply(cfg, ctx, reply_to_id, body)`
-                      Posts a reply comment on an existing thread.
-  `edit_comment(cfg, ctx, remote_comment_id, body)`
-                      Edits a remote comment.
-  `delete_comment(cfg, ctx, remote_comment_id)`
-                      Deletes a remote comment.
-  `resolve_thread(cfg, ctx, remote_thread_id, resolved)`
-                      Toggles thread resolution state on remote host.
-
-Configure the custom adapter under `opts` using its Lua require module name:
-
->
-  require("lreview").setup({
-    ["gitea\\.mycompany\\.com"] = {
-      adapter = "my_adapters.gitea", -- Dynamically loaded on remote match
-      provider = "gitea-cli",
-      host = "gitea.mycompany.com",
-    }
-  })
+Query capability support via:
+>lua
+  local adapter = require("lreview.adapter")
+  local supports = adapter.supports(resolved_ctx, "review_verdict")
 <
 
 ==============================================================================
-ADAPTER RETURN SHAPES                                 *lreview-adapter-shapes*
+ASYNC THREAD ARCHITECTURE                             *lreview-async-model*
 
-Custom adapter methods must return Lua tables conforming to these models:
+lreview.nvim offloads background operations to isolated `uv.new_work` worker
+threads via `lreview.thread`:
 
-`lreview.MR` (Returned by `query()`)
-  - `mo_id`           (string) Unique ID matching "<provider>:<repo>:<number>"
-  - `provider`        (string) Forge provider name (e.g. "gitea")
-  - `repo`            (string) Repository path, e.g. "owner/repo"
-  - `number`          (integer) Merge Request/Pull Request number
-  - `title`           (string) Title of the PR/MR
-  - `author`          (string) Username of the author
-  - `state`           (string) "open", "closed", or "merged"
-  - `source_branch`   (string) Source branch name
-  - `target_branch`   (string) Target branch name
-  - `url`             (string) Web URL of the PR/MR
-  - `updated_at`      (string) ISO-8601 timestamp string (e.g. "2026-08-29T12:00:00Z")
+- **Isolated Lua States:** Worker threads run in separate Lua environments.
+- **MessagePack Serialization:** Communication across the thread boundary uses
+  `vim.mpack.encode` and `vim.mpack.decode`.
+- **Fast Event Escapes:** All thread completion callbacks run inside libuv fast
+  event context and are wrapped in `vim.schedule` before invoking Neovim API calls.
 
-`lreview.MRDetail` (Returned by `get_mr()`)
-  Extends `lreview.MR` with additional fields:
-  - `description`     (string|nil) Description body text
-  - `base_sha`        (string|nil) Base merge commit SHA
-  - `head_sha`        (string|nil) Head branch commit SHA
-  - `files`           (table|nil) Array of file tables. Each file has:
-    - `path`          (string) Repo-relative file path
-    - `additions`     (integer) Added lines count
-    - `deletions`     (integer) Deleted lines count
-    - `change_type`   (string) "MODIFIED", "ADDED", or "REMOVED"
+==============================================================================
+CENTRALIZED SYNC BUS & DIFF CACHE                       *lreview-sync-bus*
 
-`lreview.Comment` (Returned inside `fetch_comments()`)
-  - `c_id`            (string) Unique comment ID (matches remote_id on sync)
-  - `remote_id`       (string) ID from remote platform
-  - `author`          (string) Comment author username
-  - `body`            (string) Markdown text of the comment
-  - `created_at`      (string) ISO-8601 timestamp string
-  - `in_reply_to`     (string|nil) Parent remote comment or discussion ID
+All propagation across gutter signs, virtual text, and panel redraws is handled
+by `lreview.sync`:
 
-`lreview.Thread` (Returned inside `fetch_comments()`)
-  - `t_id`            (string) Platform thread/discussion ID
-  - `mo_id`           (string) PR/MR unique ID
-  - `path`            (string) Repo-relative file path
-  - `commit_sha`      (string|nil) Diff commit SHA
-  - `start_line`      (integer) Gutter start line (1-indexed)
-  - `end_line`        (integer) Gutter end line (1-indexed)
-  - `is_draft`        (boolean) True if thread has local drafts
-  - `comments`        (table) Array of `lreview.Comment` tables
+- **Debounced Flush:** Action handlers mark buffers dirty via `sync.mark_dirty(buf)`.
+  Flush passes coalesce within an ~80ms window using `vim.uv.new_timer()`.
+- **In-Memory Diff Cache:** `sync.get_changed_lines(cwd, path)` caches `git diff`
+  results per file, rendering gutter decorations in `0.029 ms` per pass (**78.6x faster**).
 
+==============================================================================
+SUBMIT STATE MACHINE & ATOMICITY                     *lreview-submit-atomicity*
+
+Pending review changes transition through a state machine:
+- `DRAFT` (1): Unpushed local comment.
+- `SYNCED` (2): Confirmed on remote forge host.
+- `IN_FLIGHT` (4): Transient state while transmitting over network thread.
+- `MODIFIED` (8): Locally edited after remote sync.
+- `DELETED` (16): Locally soft-deleted pending remote deletion.
+- `CONFLICT` (32): Remote collision detected.
+
+Transactions use `storage.with_transaction(fn)` to wrap state updates in explicit
+SQLite `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK` blocks, guaranteeing zero local
+corruption on network failures.
 
 ==============================================================================
 DATABASE ENGINE & CONCURRENCY                         *lreview-database-engine*
@@ -284,34 +280,19 @@ lreview.nvim utilizes `kkharji/sqlite.lua` to access SQLite caches.
 SQLite Flavors ~
 The plugin automatically detects the running Lua environment:
   - If running in LuaJIT (default in Neovim), it dynamically binds directly to
-    the system `libsqlite3.so` using FFI (Foreign Function Interface) for native
-    execution speed and zero-overhead editor starts.
-  - If FFI is unavailable, it gracefully falls back to the standard LuaRocks
-    `lsqlite3` library.
+    the system `libsqlite3.so` using FFI for native execution speed.
+  - If FFI is unavailable, it gracefully falls back to `lsqlite3`.
 
 WAL Mode & Concurrency ~
-To support asynchronous operations (such as background thread pull jobs) without
-locking the user interface, SQLite is opened with WAL (Write-Ahead Logging):
-  `PRAGMA journal_mode=WAL;`
-  `PRAGMA synchronous=NORMAL;`
-
-This enables concurrent read and write operations. The background cleaner worker
-thread and Neovim editor processes can query and insert comments concurrently
-without lockouts.
+SQLite is opened with Write-Ahead Logging (`PRAGMA journal_mode=WAL;`), enabling
+concurrent reads and writes between background worker threads and the main Neovim process.
 
 ==============================================================================
 GARBAGE COLLECTION                                              *lreview-gc*
 
 SQLite garbage collection runs on database initialization when
-`db.auto_housekeep` is set to `true`.
-
-Any PR/MR marked `merged` or `closed` whose last update is older than the
-configured `db.keep_days` (default 30 days) is swept from SQLite.
-
-To safeguard your data:
-- Draft comments (`remote_id IS NULL`) are NEVER deleted.
-- Threads containing unsubmitted drafts are skipped from deletion.
-- PRs containing active draft threads are preserved.
+`db.auto_housekeep` is set to `true`. Old closed or merged MRs beyond `keep_days`
+are purged, while all local drafts (`remote_id IS NULL`) are strictly preserved.
 
 ==============================================================================
 vim:tw=78:ts=8:ft=help:norl:
