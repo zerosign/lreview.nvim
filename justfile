@@ -48,6 +48,23 @@ coverage: setup-sandbox
 # Regenerate luacov.report.out from existing luacov.stats.out
 coverage-report: setup-sandbox
     ./scripts/sandbox-nvim.fish --headless -c "lua require('luacov.reporter').report()" -c "qa"
+
+# Run automated tmux UI interactive scenario test suite
+test-ui: setup-sandbox
+    ./scripts/test_tmux_scenarios.fish
+
+# Alias for test-ui
+test-tmux: test-ui
+
+# Interactive tmux session helpers
+tmux-start: setup-sandbox
+    ./scripts/tmux-nvim.fish start
+
+tmux-stop:
+    ./scripts/tmux-nvim.fish stop
+
+tmux-capture:
+    ./scripts/tmux-nvim.fish capture
     echo "Coverage report written to luacov.report.out"
 
 # Print a compact coverage summary from the last report
