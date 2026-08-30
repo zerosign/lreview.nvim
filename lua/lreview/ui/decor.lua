@@ -161,17 +161,15 @@ function M.refresh(bufnr)
   end
 
   -- Highlight diff changes (added/modified lines in MR)
-  local target_branch = review.current.detail.target_branch
-  if target_branch then
-    local changed = git.changed_lines(target_branch, rel_path, review.current.cwd)
-    if changed then
-      for line_num, _ in pairs(changed) do
-        local l_idx = line_num - 1
-        pcall(vim.api.nvim_buf_set_extmark, bufnr, ns, l_idx, 0, {
-          number_hl_group = "LReviewDiffAdd",
-          priority = 50,
-        })
-      end
+  local sync = require("lreview.sync")
+  local changed = sync.get_changed_lines(review.current.cwd, rel_path)
+  if changed then
+    for line_num, _ in pairs(changed) do
+      local l_idx = line_num - 1
+      pcall(vim.api.nvim_buf_set_extmark, bufnr, ns, l_idx, 0, {
+        number_hl_group = "LReviewDiffAdd",
+        priority = 50,
+      })
     end
   end
 end

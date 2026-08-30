@@ -194,6 +194,14 @@ local function refresh_all_buffer_highlights()
   end
 end
 
+local sync = require("lreview.sync")
+
+sync.subscribe("panel", function()
+  if M.state and vim.api.nvim_buf_is_valid(M.state.bufnr) then
+    M.redraw()
+  end
+end)
+
 local function handle_action(action)
   if not M.state then return end
   local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
@@ -218,15 +226,12 @@ local function handle_action(action)
       vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
       return
     end
-    M.redraw()
-    refresh_buffer_highlights(thread.path)
+    sync.schedule()
     vim.notify(new_val and "lreview: thread resolved" or "lreview: thread reopened", vim.log.levels.INFO)
   elseif action == "delete" then
     if comments.thread_is_draft(thread.state) then
-      local path = thread.path
       comments.delete_thread(thread.t_id)
-      M.redraw()
-      refresh_buffer_highlights(path)
+      sync.schedule()
       vim.notify("lreview: local draft thread deleted", vim.log.levels.INFO)
     else
       vim.notify("lreview: cannot delete a synced remote thread directly", vim.log.levels.WARN)
@@ -238,8 +243,7 @@ local function handle_action(action)
       vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
     else
       vim.notify(string.format("lreview: successfully pushed %d comment(s)", count), vim.log.levels.INFO)
-      M.redraw()
-      refresh_buffer_highlights(thread.path)
+      sync.schedule()
     end
   elseif action == "push_all" then
     vim.notify("lreview: submitting all local changes...", vim.log.levels.INFO)
@@ -248,15 +252,13 @@ local function handle_action(action)
       vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
     else
       vim.notify(string.format("lreview: successfully pushed %d comment(s)", count), vim.log.levels.INFO)
-      M.redraw()
-      refresh_all_buffer_highlights()
+      sync.schedule()
     end
   elseif action == "pull" then
     vim.notify("lreview: pulling remote updates...", vim.log.levels.INFO)
     review.pull_review_async(function(success)
       if success then
-        M.redraw()
-        refresh_all_buffer_highlights()
+        sync.schedule()
       end
     end)
   end

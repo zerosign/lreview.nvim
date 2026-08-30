@@ -7,6 +7,13 @@ local M = {}
 -- Store active view state: { bufnr, winid, line_map, thread_line_map, mo_id, path, line }
 M.state = nil
 
+local sync = require("lreview.sync")
+sync.subscribe("panel", function()
+  if M.state and vim.api.nvim_buf_is_valid(M.state.bufnr) then
+    M.redraw()
+  end
+end)
+
 --- Close the active thread view if open.
 function M.close()
   if M.state then
