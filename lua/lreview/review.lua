@@ -221,6 +221,31 @@ function M.push_edit_immediately(c_id, body)
   return true, nil
 end
 
+--- Compute explicit change-set of pending local modifications for an MR.
+---@param mo_id string
+---@return table
+function M.compute_change_set(mo_id)
+  local pending = comments.get_pending_comments(mo_id)
+  local cs = {
+    additions = {},
+    replies = {},
+    updates = {},
+    deletions = {},
+  }
+  for _, d in ipairs(pending or {}) do
+    if d.state == comments.STATE.DELETED then
+      cs.deletions[#cs.deletions + 1] = d
+    elseif d.state == comments.STATE.MODIFIED then
+      cs.updates[#cs.updates + 1] = d
+    elseif comments.thread_is_draft(d.thread_state) then
+      cs.additions[#cs.additions + 1] = d
+    else
+      cs.replies[#cs.replies + 1] = d
+    end
+  end
+  return cs
+end
+
 --- Submit the review: push draft inline comments (new threads and replies) for the current MR.
 --- Only pushes inline comments; does NOT change platform review state.
 ---@param thread_id string|nil  -- optional thread ID to submit only comments from a single thread
@@ -237,7 +262,7 @@ function M.submit_review(thread_id)
   end
   local ctx = adapter.ctx(resolved, detail.number)
 
-  -- Query pending comments via the storage layer
+  -- Query pending comments via storage
   local drafts = comments.get_pending_comments(detail.mo_id)
 
   if thread_id then
@@ -337,10 +362,21 @@ function M.submit_review(thread_id)
 
   local count = 0
 
+  -- Mark items as IN_FLIGHT before pushing
+  for _, nt in ipairs(new_threads_batch) do comments.mark_in_flight(nt.c_id) end
+  for _, r in ipairs(replies) do comments.mark_in_flight(r.c_id) end
+  for _, e in ipairs(edits) do comments.mark_in_flight(e.c_id) end
+  for _, dl in ipairs(deletes) do comments.mark_in_flight(dl.c_id) end
+
   -- 1. Submit new threads in a batch
   if #new_threads_batch > 0 then
     local ok, err = resolved.adapter.submit_inline_review(resolved.cfg, ctx, detail.number, new_threads_batch)
     if not ok then
+      for _, nt in ipairs(new_threads_batch) do comments.revert_in_flight(nt.c_id, comments.STATE.DRAFT) end
+      for _, r in ipairs(replies) do comments.revert_in_flight(r.c_id, comments.STATE.DRAFT) end
+      for _, e in ipairs(edits) do comments.revert_in_flight(e.c_id, comments.STATE.MODIFIED) end
+      for _, dl in ipairs(deletes) do comments.revert_in_flight(dl.c_id, comments.STATE.DELETED) end
+      M.sync_review()
       return 0, err
     end
     -- Clear local drafts on success
@@ -351,40 +387,43 @@ function M.submit_review(thread_id)
     count = count + #new_threads_batch
   end
 
-  -- 2. Submit replies individually
+  -- 2. Push replies
   for _, r in ipairs(replies) do
     local comment_id, err = resolved.adapter.submit_reply(resolved.cfg, ctx, detail.number, r.reply_to_id, r.body)
     if not comment_id then
+      comments.revert_in_flight(r.c_id, comments.STATE.DRAFT)
+      M.sync_review()
       return count, err
     end
-    -- Clear local draft reply on success
-    comments.delete_comment(r.c_id)
+    comments.mark_comment_synced(r.c_id, comment_id)
     count = count + 1
   end
 
-  -- 3. Submit edits individually
+  -- 3. Push edits
   for _, e in ipairs(edits) do
-    local ok, err = resolved.adapter.update_comment(resolved.cfg, ctx, detail.number, e.t_id, e.remote_id, e.body)
+    local ok, err = resolved.adapter.update_comment(resolved.cfg, ctx, detail.number, e.remote_id, e.body)
     if not ok then
+      comments.revert_in_flight(e.c_id, comments.STATE.MODIFIED)
+      M.sync_review()
       return count, err
     end
-    -- Mark comment clean on success
     comments.mark_clean(e.c_id)
     count = count + 1
   end
 
-  -- 4. Submit deletes individually
+  -- 4. Push deletes
   for _, dl in ipairs(deletes) do
-    local ok, err = resolved.adapter.delete_comment(resolved.cfg, ctx, detail.number, dl.t_id, dl.remote_id)
+    local ok, err = resolved.adapter.delete_comment(resolved.cfg, ctx, detail.number, dl.remote_id)
     if not ok then
+      comments.revert_in_flight(dl.c_id, comments.STATE.DELETED)
+      M.sync_review()
       return count, err
     end
-    -- Delete row locally on success
     comments.delete_comment(dl.c_id)
     count = count + 1
   end
 
-  -- Sync remote state on success to update local IDs and clear draft markers
+  -- Always reconcile at the end
   M.sync_review()
   return count, nil
 end

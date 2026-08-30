@@ -29,25 +29,26 @@ M.THREAD_STATE = THREAD_STATE
 -- Comment States (Bit Flags)
 -- ---------------------------------------------------------------------------
 local STATE = {
-  DRAFT    = 1,  -- (00001) New local reply, never pushed
-  SYNCED   = 2,  -- (00010) Matches current remote state
-  MODIFIED = 4,  -- (00100) Synced comment edited locally (not yet pushed)
-  DELETED  = 8,  -- (01000) Synced comment deleted locally (not yet pushed)
-  CONFLICT = 16, -- (10000) Remote changed while we had local edits pending
+  DRAFT     = 1,  -- (000001) New local reply, never pushed
+  SYNCED    = 2,  -- (000010) Matches current remote state
+  IN_FLIGHT = 4,  -- (000100) Currently pushing over network thread
+  MODIFIED  = 8,  -- (001000) Synced comment edited locally (not yet pushed)
+  DELETED   = 16, -- (010000) Synced comment deleted locally (not yet pushed)
+  CONFLICT  = 32, -- (100000) Remote changed while we had local edits pending
 }
 M.STATE = STATE
 
--- Mask for all states that require a push (excludes SYNCED and CONFLICT).
--- CONFLICT must be resolved by the user before pushing is allowed.
-M.PENDING_PUSH_MASK = STATE.DRAFT + STATE.MODIFIED + STATE.DELETED -- 13
+-- Mask for all states that require a push (excludes SYNCED, IN_FLIGHT, and CONFLICT).
+M.PENDING_PUSH_MASK = STATE.DRAFT + STATE.MODIFIED + STATE.DELETED -- 25
 
 -- ---------------------------------------------------------------------------
 -- Comment State Predicates
 -- ---------------------------------------------------------------------------
 --- Check comment state flags. All accept the raw integer `state` column value.
 
-function M.is_draft(s)    return s == STATE.DRAFT    end
-function M.is_synced(s)   return s == STATE.SYNCED   end
+function M.is_draft(s)     return s == STATE.DRAFT     end
+function M.is_synced(s)    return s == STATE.SYNCED    end
+function M.is_in_flight(s) return s == STATE.IN_FLIGHT end
 function M.is_modified(s) return s == STATE.MODIFIED end
 function M.is_deleted(s)  return s == STATE.DELETED  end
 function M.is_conflict(s) return s == STATE.CONFLICT end
@@ -314,6 +315,31 @@ function M.mark_clean(c_id)
   if c then
     local decoded = decode_comment(c)
     decoded.state = STATE.SYNCED
+    M.add_comment(decoded)
+  end
+end
+
+--- Mark a comment state as IN_FLIGHT.
+---@param c_id string
+function M.mark_in_flight(c_id)
+  local c = storage.query("SELECT * FROM comments WHERE c_id = ?", c_id)[1]
+  if c then
+    local decoded = decode_comment(c)
+    decoded.prev_state = decoded.state
+    decoded.state = STATE.IN_FLIGHT
+    M.add_comment(decoded)
+  end
+end
+
+--- Revert a comment state from IN_FLIGHT back to its previous state.
+---@param c_id string
+---@param fallback_state integer|nil
+function M.revert_in_flight(c_id, fallback_state)
+  local c = storage.query("SELECT * FROM comments WHERE c_id = ?", c_id)[1]
+  if c then
+    local decoded = decode_comment(c)
+    decoded.state = decoded.prev_state or fallback_state or STATE.DRAFT
+    decoded.prev_state = nil
     M.add_comment(decoded)
   end
 end

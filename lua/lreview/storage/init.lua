@@ -200,7 +200,29 @@ local function safe_bind(pstmt, i, val)
   end
 end
 
---- Execute a statement with params, returning rows.
+--- Execute a callback within an explicit SQLite transaction.
+---@param fn fun(): any
+---@return boolean ok, any result_or_err
+function M.with_transaction(fn)
+  if not M.db then
+    return false, "database connection is not open"
+  end
+  local exec_ok, begin_err = pcall(function() M.db:execute("BEGIN TRANSACTION;") end)
+  if not exec_ok then
+    return false, begin_err
+  end
+
+  local ok, res = pcall(fn)
+  if ok then
+    pcall(function() M.db:execute("COMMIT;") end)
+    return true, res
+  else
+    pcall(function() M.db:execute("ROLLBACK;") end)
+    return false, res
+  end
+end
+
+--- Execute a parameterized SQL query returning rows.
 ---@param sql string
 ---@vararg any  -- positional bind params (nil values allowed)
 ---@return table[] rows
