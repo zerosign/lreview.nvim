@@ -333,20 +333,23 @@ function M.list_users(cfg, ctx)
   return out, nil
 end
 
---- Submit a batch of inline comments as a review (event=COMMENT).
+--- Submit a batch of inline comments as a review (supports verdict=APPROVE|REQUEST_CHANGES|COMMENT).
 ---@param cfg table
 ---@param ctx table
 ---@param number integer
 ---@param comments table[]  -- { path, line, body }
 ---@param body string|nil  -- review summary
+---@param opts table|nil  -- { verdict = "APPROVE"|"REQUEST_CHANGES"|"COMMENT" }
 ---@return boolean, string|nil
-function M.submit_inline_review(cfg, ctx, number, comments, body)
+function M.submit_inline_review(cfg, ctx, number, comments, body, opts)
+  opts = opts or {}
+  local event = opts.verdict or "COMMENT"
   local argv = api_argv(cfg, ctx)
   argv[#argv + 1] = string.format("repos/{owner}/{repo}/pulls/%d/reviews", number)
   argv[#argv + 1] = "-X"
   argv[#argv + 1] = "POST"
   argv[#argv + 1] = "-f"
-  argv[#argv + 1] = "event=COMMENT"
+  argv[#argv + 1] = "event=" .. event
   if body and body ~= "" then
     argv[#argv + 1] = "-f"
     argv[#argv + 1] = "body=" .. body

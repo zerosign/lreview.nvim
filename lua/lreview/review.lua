@@ -352,6 +352,9 @@ function M.submit_review(thread_id)
   end
 
   local total_pending = #new_threads_batch + #replies + #edits + #deletes
+  local has_verdict = adapter.supports(resolved, "review_verdict")
+  local verdict = "COMMENT"
+
   local msg = table.concat(summary, "\n") ..
   string.format("\n\nPush these %d change(s) to %s?", total_pending, resolved.provider)
   local choice = vim.fn.confirm(msg, "&Yes\n&No", 2)
@@ -370,7 +373,7 @@ function M.submit_review(thread_id)
 
   -- 1. Submit new threads in a batch
   if #new_threads_batch > 0 then
-    local ok, err = resolved.adapter.submit_inline_review(resolved.cfg, ctx, detail.number, new_threads_batch)
+    local ok, err = resolved.adapter.submit_inline_review(resolved.cfg, ctx, detail.number, new_threads_batch, nil, { verdict = verdict })
     if not ok then
       for _, nt in ipairs(new_threads_batch) do comments.revert_in_flight(nt.c_id, comments.STATE.DRAFT) end
       for _, r in ipairs(replies) do comments.revert_in_flight(r.c_id, comments.STATE.DRAFT) end
