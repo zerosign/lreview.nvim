@@ -269,7 +269,7 @@ local function handle_action(action)
 
   local thread = M.state.threads_map[cursor_line]
 
-  if not thread and action ~= "push_all" and action ~= "pull" then
+  if not thread and action ~= "push_all" and action ~= "pull" and action ~= "approve" and action ~= "reject" then
     vim.notify("lreview: move cursor onto a discussion or file row to perform action", vim.log.levels.WARN)
     return
   end
