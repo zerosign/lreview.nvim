@@ -37,7 +37,8 @@ local function base_argv(cfg, ctx)
   local argv = { cfg.provider or "glab" }
   if ctx.repo then
     argv[#argv + 1] = "--repo"
-    argv[#argv + 1] = ctx.repo
+    local full_repo = (ctx.owner and ctx.owner ~= "" and not ctx.repo:find("/")) and (ctx.owner .. "/" .. ctx.repo) or ctx.repo
+    argv[#argv + 1] = full_repo
   end
   return argv
 end
@@ -80,7 +81,9 @@ function M.get_mr_detail(cfg, ctx)
   argv[#argv + 1] = "mr"
   argv[#argv + 1] = "view"
   if ctx.ref then
-    argv[#argv + 1] = ctx.ref
+    argv[#argv + 1] = tostring(ctx.ref)
+  elseif ctx.number then
+    argv[#argv + 1] = tostring(ctx.number)
   end
   argv[#argv + 1] = "-F"
   argv[#argv + 1] = "json"
