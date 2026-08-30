@@ -355,12 +355,21 @@ function M.submit_review(thread_id)
   local has_verdict = adapter.supports(resolved, "review_verdict")
   local verdict = "COMMENT"
 
-  local msg = table.concat(summary, "\n") ..
-  string.format("\n\nPush these %d change(s) to %s?", total_pending, resolved.provider)
-  local choice = vim.fn.confirm(msg, "&Yes\n&No", 2)
-  if choice ~= 1 then
-    vim.notify("lreview: push cancelled", vim.log.levels.INFO)
-    return 0, nil
+  local confirm_ui = require("lreview.ui.confirm")
+  local choice_verdict = nil
+
+  if vim.g.lreview_test_mode then
+    -- Headless unit test mode
+    verdict = "COMMENT"
+  else
+    confirm_ui.ask_confirmation(summary, { has_verdict = has_verdict }, function(choice)
+      choice_verdict = choice
+    end)
+    if not choice_verdict then
+      vim.notify("lreview: push cancelled", vim.log.levels.INFO)
+      return 0, nil
+    end
+    verdict = choice_verdict
   end
 
   local count = 0
