@@ -364,6 +364,37 @@ local function cmd_prev()
   require("lreview.ui.decor").prev_thread()
 end
 
+local function cmd_request_review(args)
+  if not ensure_review_started() then return end
+  local cwd = vim.fn.getcwd()
+  local users = require("lreview.users").search_users(cwd, "")
+  if #users == 0 then
+    vim.notify("lreview: no repo users cached; fetching users...", vim.log.levels.INFO)
+    require("lreview.users").pull_users_async(function(success)
+      if success then
+        cmd_request_review(args)
+      end
+    end)
+    return
+  end
+  local choices = {}
+  for _, u in ipairs(users) do
+    choices[#choices + 1] = u.username
+  end
+  vim.ui.select(choices, {
+    prompt = "Select reviewer to request:",
+    format_item = function(u) return "@" .. u end,
+  }, function(selected)
+    if not selected then return end
+    local ok, err = review.request_reviewers({ selected })
+    if not ok then
+      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+    else
+      vim.notify("lreview: requested review from @" .. selected, vim.log.levels.INFO)
+    end
+  end)
+end
+
 -- ---------------------------------------------------------------------------
 -- Public Commands Registration (Complexity = 1)
 -- ---------------------------------------------------------------------------
@@ -385,6 +416,7 @@ function M.register_commands()
   api.nvim_create_user_command("LocalReviewPullRequest", cmd_pull_requests, {})
   api.nvim_create_user_command("LocalReviewClose", cmd_close, { nargs = "?" })
   api.nvim_create_user_command("LocalReviewApprove", cmd_approve, { nargs = "?" })
+  api.nvim_create_user_command("LocalReviewRequestReview", cmd_request_review, { nargs = "?" })
   api.nvim_create_user_command("LocalReviewToggle", cmd_toggle, {})
   api.nvim_create_user_command("LocalReviewHover", cmd_open, {})
   api.nvim_create_user_command("LocalReviewOpen", cmd_open, {})

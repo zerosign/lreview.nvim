@@ -775,6 +775,32 @@ function M.create_review(opts, cwd)
   return url, nil
 end
 
+--- Request reviewers for an MR/PR.
+---@param reviewers string[]
+---@param number integer|nil
+---@param cwd string|nil
+---@return boolean, string|nil
+function M.request_reviewers(reviewers, number, cwd)
+  local num = number or (M.current and M.current.detail and M.current.detail.number)
+  if not num then
+    return false, "no active review; run LocalReviewStart first (or pass an MR number)"
+  end
+  cwd = cwd or (M.current and M.current.cwd) or vim.fn.getcwd()
+  local resolved = adapter.resolve(cwd)
+  if not resolved then
+    return false, "no git remote detected"
+  end
+  if not adapter.supports(resolved, "assign_reviewers") then
+    return false, "reviewer assignment capability is not supported by active adapter"
+  end
+  local ctx = adapter.ctx(resolved, num)
+  local ok, err = resolved.adapter.assign_reviewers(resolved.cfg, ctx, num, reviewers)
+  if not ok then
+    return false, err
+  end
+  return true, nil
+end
+
 --- Update an MR/PR's title and description.
 ---@param title string
 ---@param body string

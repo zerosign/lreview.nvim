@@ -474,6 +474,26 @@ function M.approve_mr(cfg, ctx, number)
   return true, nil
 end
 
+--- Assign reviewers to a pull request.
+---@param cfg table
+---@param ctx table
+---@param number integer
+---@param reviewers string[]
+---@return boolean, string|nil
+function M.assign_reviewers(cfg, ctx, number, reviewers)
+  local argv = base_argv(cfg, ctx)
+  argv[#argv + 1] = "pr"
+  argv[#argv + 1] = "edit"
+  argv[#argv + 1] = tostring(number)
+  argv[#argv + 1] = "--add-reviewer"
+  argv[#argv + 1] = table.concat(reviewers, ",")
+  local res = base.run(argv, { cwd = ctx.cwd })
+  if not res.ok then
+    return false, res.error
+  end
+  return true, nil
+end
+
 --- Discover pull request templates in the repo.
 --- GitHub looks for .github/PULL_REQUEST_TEMPLATE.md and
 --- .github/PULL_REQUEST_TEMPLATE/*.md (plus root/docs variants).
