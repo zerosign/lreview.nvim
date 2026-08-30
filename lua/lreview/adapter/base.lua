@@ -61,9 +61,16 @@ local function normalize_error(combined)
 end
 M.normalize_error = normalize_error
 
+local function escape_arg(s)
+  if vim.fn and vim.fn.shellescape then
+    return vim.fn.shellescape(s)
+  end
+  return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
+end
+
 --- Execute a CLI command and return a normalized result.
 ---
---- The `executor` is injectable for testing (defaults to vim.fn.system).
+--- The `executor` is injectable for testing (defaults to vim.system or io.popen on threads).
 ---@param argv string[]  -- e.g. { "gh", "pr", "list", ... }
 ---@param opts table|nil
 ---@param opts.cwd string|nil
@@ -74,37 +81,62 @@ M.normalize_error = normalize_error
 function M.run(argv, opts, callback)
   opts = opts or {}
   local executor = opts.executor or function(args, cwd)
-    -- Use vim.system with the cwd option (vim.fn.system(args, cwd) does not
-    -- reliably honor a cwd different from the process cwd in this build).
-    local o = { text = true }
-    if cwd then
-      o.cwd = cwd
-    end
-    if callback then
-      vim.system(args, o, function(res)
-        vim.schedule(function()
-          local stdout = res.stdout or ""
-          local stderr = res.stderr or ""
-          local combined = stdout .. "\n" .. stderr
-          local ok = res.code == 0 and not looks_like_error(combined)
-          local err_msg = nil
-          if not ok then
-            err_msg = string.format("Command failed: %s | Error: %s", table.concat(argv, " "), normalize_error(combined))
-          end
-          callback({
-            ok = ok,
-            stdout = stdout,
-            stderr = stderr,
-            combined = combined,
-            code = res.code,
-            error = err_msg,
-          })
+    if vim.system then
+      local o = { text = true }
+      if cwd then
+        o.cwd = cwd
+      end
+      if callback then
+        vim.system(args, o, function(res)
+          vim.schedule(function()
+            local stdout = res.stdout or ""
+            local stderr = res.stderr or ""
+            local combined = stdout .. "\n" .. stderr
+            local ok = res.code == 0 and not looks_like_error(combined)
+            local err_msg = nil
+            if not ok then
+              err_msg = string.format("Command failed: %s | Error: %s", table.concat(argv, " "), normalize_error(combined))
+            end
+            callback({
+              ok = ok,
+              stdout = stdout,
+              stderr = stderr,
+              combined = combined,
+              code = res.code,
+              error = err_msg,
+            })
+          end)
         end)
-      end)
-      return nil
+        return nil
+      else
+        local res = vim.system(args, o):wait()
+        return { stdout = res.stdout, stderr = res.stderr, code = res.code }
+      end
     else
-      local res = vim.system(args, o):wait()
-      return { stdout = res.stdout, stderr = res.stderr, code = res.code }
+      -- Thread execution fallback: io.popen
+      local cmd_parts = {}
+      for _, arg in ipairs(args) do
+        cmd_parts[#cmd_parts + 1] = escape_arg(arg)
+      end
+      local cmd_str = table.concat(cmd_parts, " ")
+      if cwd then
+        cmd_str = "cd " .. escape_arg(cwd) .. " && " .. cmd_str
+      end
+      local f = io.popen(cmd_str .. " 2>&1")
+      if not f then
+        return { stdout = "", stderr = "failed to execute process on worker thread", code = 1 }
+      end
+      local out = f:read("*a") or ""
+      local ok_close, exit_type, code = f:close()
+      local exit_code = 0
+      if type(code) == "number" then
+        exit_code = code
+      elseif type(exit_type) == "number" then
+        exit_code = exit_type
+      elseif ok_close == false or ok_close == nil then
+        exit_code = 1
+      end
+      return { stdout = out, stderr = "", code = exit_code }
     end
   end
 

@@ -778,8 +778,41 @@ function M.resolve_thread(thread_id, resolved_val)
   return true, nil
 end
 
+--- Thread-entry point for sync_review.
+--- Executed on worker thread with an isolated Lua state.
+---@param db_path string
+---@param lazy_sqlite string
+---@param args table  -- { cwd, detail }
+---@return table
+function M.sync_review_thread(db_path, lazy_sqlite, args)
+  local sqlite = require("sqlite")
+  local db = sqlite.new(db_path, { keep_open = true })
+  db:eval("PRAGMA journal_mode=WAL;")
+  db:eval("PRAGMA busy_timeout=5000;")
+
+  local old_current = M.current
+  if args and args.cwd and args.detail then
+    M.current = {
+      cwd = args.cwd,
+      detail = args.detail,
+    }
+  end
+
+  local count, err = M.sync_review()
+
+  M.current = old_current
+  db:close()
+
+  if err then
+    return { ok = false, err = err }
+  end
+  return { ok = true, count = count }
+end
+
+local thread_worker = nil
+
 --- Fetch remote reviews asynchronously (non-blocking).
---- Executes the sync_review script in a headless Neovim background job.
+--- Runs sync_review on a libuv thread with MessagePack serialization.
 ---@param callback fun(success: boolean)|nil
 ---@return boolean, string|nil
 function M.pull_review_async(callback)
@@ -788,48 +821,36 @@ function M.pull_review_async(callback)
     return false, "no active review"
   end
 
-  local plugin_root = vim.fn.fnamemodify(debug.getinfo(1).source:match("@(.*)$"), ":h:h:h")
-  local current_cwd = M.current.cwd or vim.fn.getcwd()
-  local cmd = {
-    vim.v.progpath,
-    "--headless",
-    "--cmd",
-    "set runtimepath^=" .. vim.fn.escape(plugin_root, " "),
-    "-c",
-    string.format("lua vim.g.lreview_pull_job = true; require('lreview').api.init_session(%q)", current_cwd),
-    "-c",
-    "lua require('lreview').api.sync_review()",
-    "-c",
-    "qa"
-  }
-
-  vim.system(cmd, { cwd = current_cwd }, function(res)
-    vim.schedule(function()
-      local success = (res.code == 0)
+  if not thread_worker then
+    local thread = require("lreview.thread")
+    thread_worker = thread.create_worker("lreview.review", "sync_review_thread", function(res)
+      local success = res and res.ok
       if success then
-        -- Refresh highlights on active buffers
         local decor = require("lreview.ui.decor")
         for bufnr, _ in pairs(decor.enabled_buffers) do
           if vim.api.nvim_buf_is_valid(bufnr) then
             decor.refresh(bufnr)
           end
         end
-        -- Refresh thread view if it is open
         local tv = require("lreview.ui.thread_view")
         if tv.state and vim.api.nvim_buf_is_valid(tv.state.bufnr) then
           tv.redraw()
         end
-        -- Refresh summary panel if it is open
         local summary = require("lreview.ui.summary")
         if summary.state and vim.api.nvim_buf_is_valid(summary.state.bufnr) then
           summary.redraw()
         end
       end
       if callback then
-        callback(success)
+        callback(success == true)
       end
     end)
-  end)
+  end
+
+  thread_worker:queue({
+    cwd = M.current.cwd or vim.fn.getcwd(),
+    detail = M.current.detail,
+  })
   return true, nil
 end
 

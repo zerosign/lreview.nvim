@@ -16,8 +16,19 @@
 
 local M = {}
 
+local default_db_path = nil
+local function get_default_db_path()
+  if default_db_path then return default_db_path end
+  if vim.fn and vim.fn.stdpath then
+    default_db_path = vim.fn.stdpath("data") .. "/lreview/lreview.db"
+  else
+    default_db_path = "tmp/lreview.db"
+  end
+  return default_db_path
+end
+
 M.defaults = {
-  db_path = vim.fn.stdpath("data") .. "/lreview/lreview.db",
+  db_path = nil,
   db = {
     busy_timeout_ms = 5000,
     keep_days = 30,
@@ -62,6 +73,9 @@ end
 ---@return table
 function M.get_defaults()
   local d = vim.deepcopy(M.defaults)
+  if not d.db_path then
+    d.db_path = get_default_db_path()
+  end
   if M.user_opts.defaults then
     deep_merge(d, M.user_opts.defaults)
   end
