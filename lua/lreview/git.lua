@@ -178,27 +178,45 @@ end
 ---@return string|nil
 function M.default_branch(cwd)
   local out, err = git({ "symbolic-ref", "--short", "refs/remotes/origin/HEAD" }, cwd)
-  if out then
+  if out and out ~= "" then
     local b = vim.trim(out):gsub("^origin/", "")
     if b ~= "" and b ~= "HEAD" then
       return b
     end
   end
-  -- If current branch is a known default, return it
-  local current = M.current_branch(cwd)
-  if current == "main" or current == "master" then
-    return current
+  for _, candidate in ipairs({ "main", "master" }) do
+    local chk, _ = git({ "rev-parse", "--verify", "refs/heads/" .. candidate }, cwd)
+    if chk and chk ~= "" then
+      return candidate
+    end
   end
-  -- Fall back to a known default in remote branches
-  local branches = M.remote_branches(cwd)
-  for _, b in ipairs({ "main", "master" }) do
-    for _, rb in ipairs(branches) do
-      if rb == b then
-        return b
+  return "main"
+end
+
+--- Get changed files and diff stats for local review fallback.
+---@param cwd string|nil
+---@param target_branch string|nil
+---@return table[]  -- list of { path=..., additions=..., deletions=... }
+function M.changed_files(cwd, target_branch)
+  target_branch = target_branch or M.default_branch(cwd) or "main"
+  local out, _ = git({ "diff", "--numstat", target_branch }, cwd)
+  if not out or out == "" then
+    out, _ = git({ "diff", "--numstat", "HEAD" }, cwd)
+  end
+  local files = {}
+  if out and out ~= "" then
+    for line in out:gmatch("[^\n]+") do
+      local adds, dels, p = line:match("^(%d+)%s+(%d+)%s+(.+)$")
+      if adds and dels and p then
+        files[#files + 1] = {
+          path = p,
+          additions = tonumber(adds) or 0,
+          deletions = tonumber(dels) or 0,
+        }
       end
     end
   end
-  return nil
+  return files
 end
 
 --- Create a new branch from the current HEAD and push it to origin.

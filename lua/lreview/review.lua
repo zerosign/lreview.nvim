@@ -74,7 +74,23 @@ function M.init_session(cwd)
 
   local detail, err = M.resolve_current_mr(cwd)
   if not detail then
-    return nil, err
+    local branch = git.current_branch(cwd) or "head"
+    local resolved = adapter.resolve(cwd)
+    local ctx = resolved and adapter.ctx(resolved, branch) or {}
+    local def_branch = git.default_branch(cwd) or "main"
+    detail = {
+      mo_id = "local:" .. (ctx.repo or "workspace") .. ":" .. branch,
+      provider = (resolved and resolved.cfg and resolved.cfg.adapter) or "local",
+      repo = (ctx.owner and ctx.repo) and (ctx.owner .. "/" .. ctx.repo) or ctx.repo or "workspace",
+      number = 0,
+      title = "Local Draft Review (" .. branch .. ")",
+      description = "No remote PR/MR currently linked.",
+      state = "draft",
+      unlinked = true,
+      source_branch = branch,
+      target_branch = def_branch,
+      files = git.changed_files(cwd, def_branch) or {},
+    }
   end
   local ok, oerr = storage.open()
   if not ok then
@@ -89,8 +105,8 @@ function M.init_session(cwd)
   -- job sets vim.g.lreview_pull_job before calling init_session, which would
   -- otherwise spawn an unbounded chain of nested pull jobs (each job spawning
   -- another) and pile up orphaned nvim processes contending on the SQLite DB.
-  if not vim.g.lreview_pull_job then
-    M.pull_review_async()
+  if not vim.g.lreview_pull_job and not detail.unlinked then
+    M.pull_review_async(cwd)
   end
   return detail, nil
 end
@@ -944,7 +960,7 @@ function M.pull_review_async(callback)
           summary.redraw()
         end
       end
-      if callback then
+      if callback and type(callback) == "function" then
         callback(success == true)
       end
     end)

@@ -154,6 +154,23 @@ vim.cmd("LocalReviewToggle") -- toggle back off
 -- Test pull command
 vim.cmd("LocalReviewPull")
 
+-- Test unlinked fallback when adapter returns nil MR
+adapter.resolve = function(cwd)
+  return {
+    adapter = {
+      name = "github",
+      provider = "gh",
+      get_mr_by_branch = function() return nil, "no pull request" end,
+      get_mr_detail = function() return nil, "no pull request" end,
+    },
+    cfg = { adapter = "github" },
+  }
+end
+local unlinked_detail, uerr = review.init_session(vim.fn.getcwd())
+assert(unlinked_detail and unlinked_detail.unlinked == true, "unlinked detail fallback failed")
+assert(unlinked_detail.number == 0, "unlinked detail number should be 0")
+print("SUCCESS: Unlinked draft review fallback verified.")
+
 -- Restoring environment
 adapter.resolve = original_resolve
 vim.ui.select = original_select

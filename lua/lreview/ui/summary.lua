@@ -52,10 +52,16 @@ function M.redraw()
   local win_w = (M.state and M.state.winid and vim.api.nvim_win_is_valid(M.state.winid)) and vim.api.nvim_win_get_width(M.state.winid) or 100
   if win_w < 80 then win_w = 80 end
 
+  local is_unlinked = review.current and review.current.detail and review.current.detail.unlinked
   if M.state.view_mode == "files" then
-    lines[#lines + 1] = "=== Local Review Summary [Files] ==="
-    lines[#lines + 1] = string.format("Filter: %s | Sort: [%s] (f: filter, g: toggle view, S: cycle sort)",
-      M.state.show_all and "[Showing All]" or "[Active & Drafts Only]", M.state.sort_mode)
+    lines[#lines + 1] = is_unlinked and "=== Local Review Summary [Files - Local / Unlinked] ===" or "=== Local Review Summary [Files] ==="
+    if is_unlinked then
+      lines[#lines + 1] = string.format("Branch: %s ──> %s | No active remote PR/MR (Press [C] to Create PR/MR)",
+        review.current.detail.source_branch or "head", review.current.detail.target_branch or "main")
+    else
+      lines[#lines + 1] = string.format("Filter: %s | Sort: [%s] (f: filter, g: toggle view, S: cycle sort)",
+        M.state.show_all and "[Showing All]" or "[Active & Drafts Only]", M.state.sort_mode)
+    end
     lines[#lines + 1] = ""
     lines[#lines + 1] = string.format(" %-12s %-8s %-8s %s", "Status", "+Adds", "-Dels", "Path")
     lines[#lines + 1] = string.rep("─", win_w)
@@ -403,6 +409,7 @@ function M.open()
   vim.keymap.set("n", "S", function() M.cycle_sort_mode() end, opts)
   vim.keymap.set("n", "A", function() handle_action("approve") end, opts)
   vim.keymap.set("n", "R", function() handle_action("reject") end, opts)
+  vim.keymap.set("n", "C", function() M.close() vim.cmd("LocalReviewCreate") end, opts)
 
   local ui_cfg = config.get_defaults().ui or {}
   local layout = ui_cfg.layout or "split"
