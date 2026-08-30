@@ -310,4 +310,42 @@ function M.open_new_comment(path, start_line, end_line)
   end)
 end
 
+--- Create an MR scratchpad editor for multi-line description and title editing.
+--- Pre-filled with Title header line and template content.
+---@param template_content string|nil
+---@param save_callback fun(title: string, body: string)
+function M.open_mr_editor(template_content, save_callback)
+  local initial_lines = {
+    "# Title: Enter MR Title Here",
+    "",
+    "<!-- Write your merge request description below -->",
+  }
+  if template_content and template_content ~= "" then
+    for l in template_content:gmatch("[^\r\n]+") do
+      initial_lines[#initial_lines + 1] = l
+    end
+  end
+
+  local initial_text = table.concat(initial_lines, "\n")
+
+  create_scratchpad(initial_text, function(text)
+    local title = "New Merge Request"
+    local body_lines = {}
+    local parsed_title = false
+
+    for line in text:gmatch("[^\r\n]+") do
+      if not parsed_title and line:match("^#%s*Title:%s*(.*)") then
+        local t = line:match("^#%s*Title:%s*(.*)")
+        if t and t ~= "" then title = t end
+        parsed_title = true
+      elseif not line:match("^<!%-%-.*%-%->") then
+        body_lines[#body_lines + 1] = line
+      end
+    end
+
+    local body = table.concat(body_lines, "\n"):gsub("^%s*(.-)%s*$", "%1")
+    save_callback(title, body)
+  end)
+end
+
 return M

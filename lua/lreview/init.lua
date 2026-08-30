@@ -157,11 +157,23 @@ local function pick_template_and_create(cwd, choices, target_choices)
       if not target then
         return
       end
-      local title = vim.fn.input("Title: ")
-      if title == "" then
-        return
-      end
-      execute_create_mr(cwd, choice, title, target)
+      require("lreview.ui.editor").open_mr_editor(choice.content, function(title, body)
+        local source_branch = git.current_branch(cwd)
+        local opts = {
+          title = title,
+          body = body,
+          source_branch = source_branch,
+          target_branch = target,
+          template = choice.path,
+        }
+        local url, err = review.create_review(opts, cwd)
+        if not url then
+          vim.notify("lreview: failed to create MR: " .. tostring(err), vim.log.levels.ERROR)
+        else
+          vim.notify("lreview: created MR: " .. url, vim.log.levels.INFO)
+          require("lreview.sync").schedule()
+        end
+      end)
     end)
   end)
 end

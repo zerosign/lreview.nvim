@@ -757,6 +757,24 @@ function M.approve_review(number)
   return true, nil
 end
 
+--- Create a new MR/PR on the platform.
+---@param opts table -- { title, body, source_branch, target_branch, draft? }
+---@param cwd string|nil
+---@return string|nil url, string|nil err
+function M.create_review(opts, cwd)
+  cwd = cwd or vim.fn.getcwd()
+  local resolved = adapter.resolve(cwd)
+  if not resolved then
+    return nil, "no git remote detected"
+  end
+  local ctx = adapter.ctx(resolved)
+  local url, err = resolved.adapter.create_mr(resolved.cfg, ctx, opts)
+  if not url then
+    return nil, err
+  end
+  return url, nil
+end
+
 --- Update an MR/PR's title and description.
 ---@param title string
 ---@param body string
