@@ -97,7 +97,35 @@ function M.resolve_current_mr(cwd)
   return detail, nil
 end
 
+--- Build a local (unlinked) fallback MR detail without any network call.
+--- Used to render the UI immediately while the real MR resolves in the
+--- background (async init_session). Fast: only git subprocesses + SQLite.
+---@param cwd string
+---@return lreview.MRDetail
+local function local_fallback_detail(cwd)
+  local branch = git.current_branch(cwd) or "head"
+  local resolved = adapter.resolve(cwd)
+  local ctx = resolved and adapter.ctx(resolved, branch) or {}
+  local def_branch = git.default_branch(cwd) or "main"
+  return {
+    mo_id = "local:" .. (ctx.repo or "workspace") .. ":" .. branch,
+    provider = (resolved and resolved.cfg and resolved.cfg.adapter) or "local",
+    repo = (ctx.owner and ctx.repo) and (ctx.owner .. "/" .. ctx.repo) or ctx.repo or "workspace",
+    number = 0,
+    title = "Local Draft Review (" .. branch .. ")",
+    description = "No remote PR/MR currently linked.",
+    state = "draft",
+    unlinked = true,
+    source_branch = branch,
+    target_branch = def_branch,
+    files = git.changed_files(cwd, def_branch) or {},
+  }
+end
+
 --- Start a review: resolve MR, open storage, cache the MR detail.
+--- Synchronous (may block on the network call to resolve the MR). For a
+--- non-blocking variant that renders immediately and resolves the MR in the
+--- background, use init_session_async.
 ---@param cwd string|nil
 ---@return lreview.MRDetail|nil, string|nil
 function M.init_session(cwd)
@@ -108,23 +136,7 @@ function M.init_session(cwd)
 
   local detail, err = M.resolve_current_mr(cwd)
   if not detail then
-    local branch = git.current_branch(cwd) or "head"
-    local resolved = adapter.resolve(cwd)
-    local ctx = resolved and adapter.ctx(resolved, branch) or {}
-    local def_branch = git.default_branch(cwd) or "main"
-    detail = {
-      mo_id = "local:" .. (ctx.repo or "workspace") .. ":" .. branch,
-      provider = (resolved and resolved.cfg and resolved.cfg.adapter) or "local",
-      repo = (ctx.owner and ctx.repo) and (ctx.owner .. "/" .. ctx.repo) or ctx.repo or "workspace",
-      number = 0,
-      title = "Local Draft Review (" .. branch .. ")",
-      description = "No remote PR/MR currently linked.",
-      state = "draft",
-      unlinked = true,
-      source_branch = branch,
-      target_branch = def_branch,
-      files = git.changed_files(cwd, def_branch) or {},
-    }
+    detail = local_fallback_detail(cwd)
   end
   local ok, oerr = storage.open()
   if not ok then
@@ -155,6 +167,102 @@ function M.init_session(cwd)
     M.pull_review_async(cwd)
   end
   return detail, nil
+end
+
+--- Worker-thread entry point: resolve the current MR (network call) off the
+--- main thread. Runs inside uv.new_work via thread.create_worker, so it must
+--- be self-contained (no closures) and use io.popen fallbacks for git/CLI.
+---@param db_path string
+---@param lazy_sqlite string
+---@param args table  -- { cwd = string }
+---@return table  -- { ok, detail?, err? }
+function M.resolve_mr_thread(db_path, lazy_sqlite, args)
+  local cwd = args and args.cwd
+  if not cwd then
+    return { ok = false, err = "no cwd provided" }
+  end
+  local ok, detail, err = pcall(M.resolve_current_mr, cwd)
+  if not ok then
+    return { ok = false, err = tostring(detail) }
+  end
+  if not detail then
+    return { ok = false, err = err }
+  end
+  return { ok = true, detail = detail }
+end
+
+local init_worker = nil
+
+--- Non-blocking variant of init_session. Sets M.current with a local fallback
+--- detail immediately (no network), then resolves the real MR on a worker
+--- thread and upgrades M.current.detail when it arrives. The network call never
+--- blocks the UI. Used by the summary panel and other instant-UI entry points.
+---@param cwd string|nil
+---@param callback fun(detail: lreview.MRDetail|nil, err: string|nil)|nil  -- called when the real MR resolves
+---@return lreview.MRDetail  -- local fallback detail (immediate, non-blocking)
+function M.init_session_async(cwd, callback)
+  cwd = vim.fn.fnamemodify(cwd or vim.fn.getcwd(), ":p")
+  if cwd:sub(-1) == "/" or cwd:sub(-1) == "\\" then
+    cwd = cwd:sub(1, -2)
+  end
+
+  local ok, oerr = storage.open()
+  if not ok then
+    if callback then callback(nil, oerr) end
+    return nil, oerr
+  end
+
+  -- Crash recovery: revert any comments stuck in IN_FLIGHT state (item 4).
+  local recovered = comments.recover_in_flight()
+  if recovered > 0 and vim.notify then
+    vim.notify(string.format("lreview: recovered %d comment(s) from interrupted push", recovered), vim.log.levels.INFO)
+  end
+
+  -- Set M.current with a local fallback immediately so the UI never blocks.
+  local fallback = local_fallback_detail(cwd)
+  pull_request.upsert(fallback)
+  M.current = {
+    detail = fallback,
+    cwd = cwd,
+  }
+
+  -- Invalidate diff cache when starting a new session (branch may have changed). (item 5)
+  local sync = require("lreview.sync")
+  sync.invalidate_diff_cache(cwd)
+
+  -- Resolve the real MR on a worker thread (network off the main thread).
+  if not init_worker then
+    local thread = require("lreview.thread")
+    init_worker = thread.create_worker("lreview.review", "resolve_mr_thread", function(res)
+      local detail = res and res.ok and res.detail
+      if detail and M.current and M.current.cwd == cwd then
+        -- Upgrade the session to the real (linked) MR detail.
+        pull_request.upsert(detail)
+        M.current.detail = detail
+        -- Auto-pull remote updates only in interactive sessions. The headless
+        -- pull job sets vim.g.lreview_pull_job before calling init_session,
+        -- which would otherwise spawn an unbounded chain of nested pull jobs.
+        if not vim.g.lreview_pull_job and not detail.unlinked then
+          M.pull_review_async(cwd)
+        end
+        -- Refresh any open UI (decor) now that the real MR is known.
+        local sync2 = require("lreview.sync")
+        sync2.invalidate_diff_cache(cwd)
+        for bufnr, _ in pairs(require("lreview.ui.decor").enabled_buffers) do
+          if vim.api.nvim_buf_is_valid(bufnr) then
+            sync2.mark_dirty(bufnr)
+          end
+        end
+        sync2.schedule()
+      end
+      if callback and type(callback) == "function" then
+        callback(detail, (not detail) and (res and res.err) or nil)
+      end
+    end)
+  end
+
+  init_worker:queue({ cwd = cwd })
+  return fallback, nil
 end
 
 --- Add a draft comment on a line range of a file in the current review.

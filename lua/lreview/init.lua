@@ -329,7 +329,8 @@ local function cmd_open()
 end
 
 local function cmd_summary()
-  if not ensure_review_started() then return end
+  -- Non-blocking: summary.open uses init_session_async if no session is active,
+  -- so opening the summary never blocks on the network MR resolution.
   require("lreview.ui.summary").open()
 end
 

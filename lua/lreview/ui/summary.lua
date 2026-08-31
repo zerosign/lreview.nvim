@@ -375,7 +375,13 @@ end
 
 function M.open()
   if not review.current then
-    local detail, err = review.init_session()
+    -- Non-blocking: render from a local fallback immediately, upgrade to the
+    -- real MR detail when it resolves in the background.
+    local detail, err = review.init_session_async(nil, function(real_detail, real_err)
+      if real_detail and M.state and vim.api.nvim_buf_is_valid(M.state.bufnr) then
+        M.redraw()
+      end
+    end)
     if not detail then
       vim.notify("lreview: failed to initialize review session: " .. tostring(err), vim.log.levels.ERROR)
       return
