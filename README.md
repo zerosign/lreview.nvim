@@ -2,6 +2,20 @@
 
 A unified, offline-first, non-invasive Merge/Pull Request code review plugin for Neovim. Review changes locally across GitHub and GitLab using a local SQLite cache.
 
+> ## ⚠️ Warning — Experimental Plugin
+>
+> **This plugin is still experimental and under active development.**
+>
+> - Do **not** use this as your primary review tool yet.
+> - The API, commands, configuration, and storage format may change or break
+>   without notice between versions.
+> - There are a bunch of **performance issues** and **likely bugs** along the
+>   way that may trigger **unexpected conditions**.
+> - Bugs and data-loss edge cases are possible. Use it **at your own risk**.
+>
+> If you do try it, prefer testing against a **throwaway repository** or a
+> **non-critical branch** before relying on it for real reviews.
+
 ```mermaid
 graph TD
     User([User]) -->|LocalReviewComment| UI[Local Review Buffer]
