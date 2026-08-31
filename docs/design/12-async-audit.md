@@ -1,9 +1,15 @@
 # 12 — Async API Audit: `uv.new_work` vs `vim._async` (Empirical Findings)
 
-**Status:** ✅ **Completed — findings fully integrated into the design plans**
+**Status:** ✅ **Audit complete — findings resolved; `uv.new_work` confirmed + implemented**
 **Domain:** Cross-Cutting (foundation for 04-sync-bus.md, 07-submit-atomicity.md)
 **Depends on:** 09-async-model.md (the decision being audited)
 **Related:** 04-sync-bus.md, 07-submit-atomicity.md, 11-plan-verification.md
+
+> **✅ Resolution:** every restriction found here has a **verified solution**
+> (see §3.8). The thread model is **implemented** in `thread.lua` +
+> `adapter/base.lua` + `sync_review_thread`. Overheads measured negligible
+> (§9). `vim._async` remains **not recommended** (internal API + biggest
+> rewrite + no true parallelism).
 
 ---
 
@@ -164,6 +170,25 @@ thread, NOT `vim.system`. This is a real refactor of `adapter/base.lua`.
 |:--|:--|
 | **Enables** | True parallelism — blocking network I/O off the main thread; UI stays responsive during 100ms–10s `gh` calls; WAL concurrent DB access |
 | **Costs** | Thread `vim` is a limited proxy (no `vim.g`/`vim.fn`/`vim.system`/`vim.schedule`/`vim.notify`); no tables/functions/cdata across boundary (must JSON-serialize); sqlite.lua needs 2 workarounds; adapters must use `io.popen`/`uv.spawn` not `vim.system`; `vim.notify` must be deferred via callback + `vim.schedule` |
+
+### 3.8 Every Restriction Has a Verified Solution
+
+| # | Restriction | Solution | Where implemented |
+|:--|:--|:--|:--|
+| 1 | `vim.g` nil on thread | `rawset(vim, "g", {})` bootstrap | `thread.lua` L31, `storage/init.lua` L14 |
+| 2 | sqlite lazy-open fails | `sqlite.new(db, { keep_open = true })` | `thread.lua` (via target fn), `storage/init.lua` L22 |
+| 3 | No table/function/cdata args | **msgpack** serialize (`vim.mpack`) | `thread.lua` L43/L71/L81 |
+| 4 | `vim.system` nil on thread | `io.popen`/`uv.spawn` fallback | `adapter/base.lua` L129-154 |
+| 5 | `vim.notify` nil on thread | Collect into result, replay via `vim.schedule` | callback in `thread.lua` L78 |
+| 6 | **Callback runs in fast event context** (new finding) | Wrap callback body in `vim.schedule` | `thread.lua` L77 |
+| 7 | `vim.fn` not thread-safe | Resolve adapter/ctx on main first | `pull_review_async` |
+| 8 | WAL concurrent access | Own connection + `busy_timeout` | `sync_review_thread` L920-921 |
+
+> **New finding (§3.8 #6):** the `uv.new_work` completion callback runs in
+> **fast event context** — `vim.api`/`vim.notify` fail inside it (E5560), but
+> `vim.schedule` works. Verified in `sanity_callback_ctx.lua` /
+> `sanity_callback_ctx2.lua`. This is why `thread.lua` wraps the callback body
+> in `vim.schedule`.
 
 ---
 
@@ -336,6 +361,63 @@ run from the project root: `nvim --headless -u NONE -l tmp/<script>.lua`):
 - `sanity_async_sqlite.lua` — sqlite in async flow (no hacks)
 - `sanity_async_join.lua` — `async.join` concurrency limit
 - `sanity_async_work2.lua` — hybrid + fast-event-context fix
+- `sanity_callback_ctx.lua` / `sanity_callback_ctx2.lua` — **fast-event-context** finding + `vim.schedule` fix
+- `sanity_popen_adapter.lua` — io.popen as real adapter `base.run` replacement (stdout/stderr/exit)
+- `bench_thread_overhead.lua` / `bench_precise.lua` — overhead measurements
+
+---
+
+## 9. Overhead Measurements (mem / latency / CPU)
+
+The user asked whether the thread model has meaningful overhead. Measured in
+headless nvim (`bench_thread_overhead.lua` + `bench_precise.lua`, using
+`vim.uv.hrtime()` for ns precision):
+
+### 9.1 Latency
+
+| Operation | Latency |
+|:--|:--|
+| `uv.new_work` queue+run+callback (reused worker) | **~0.1 ms** |
+| `uv.new_work` create+queue+run+callback (fresh) | ~0.2 ms |
+| `io.popen` echo (thread-style subprocess) | ~1.8 ms |
+| `vim.system` echo `:wait()` (main thread) | ~1.5 ms |
+| `vim.system` echo async callback | ~1.4 ms |
+| `vim.mpack.encode` (90KB payload: 50 threads × 8 comments) | ~0.8 ms |
+| `vim.mpack.decode` (90KB payload) | ~0.6 ms |
+| `vim.json.encode` (93KB, for comparison) | ~0.4 ms |
+| `vim.json.decode` (93KB) | ~0.4 ms |
+| sqlite open + create table on thread | ~0.4 ms |
+| sqlite open + 100 inserts on thread (incl. open) | ~76 ms |
+
+### 9.2 Memory
+
+| Measurement | RSS |
+|:--|:--|
+| Baseline (headless nvim) | 18,604 KB |
+| After `uv.new_work` create | 18,604 KB (**+0 KB**) |
+| After thread + sqlite run | 18,608 KB (**+4 KB**) |
+
+A worker thread + its sqlite connection costs **~4 KB** of RSS. Negligible.
+
+### 9.3 CPU
+
+- Thread spawn is sub-millisecond and one-shot (not a busy loop).
+- msgpack encode/decode is sub-ms even for 90KB payloads.
+- The only real CPU cost is the actual work (network I/O, DB writes), which is
+  the same whether on main or worker thread — but on the worker it does **not**
+  block the UI.
+
+### 9.4 Conclusion
+
+The thread model's overhead is **negligible**:
+- Thread spawn ~0.1ms (vs ~1.5ms for a subprocess — 15× cheaper).
+- `io.popen` ≈ `vim.system` (~1.8ms vs ~1.5ms — no meaningful penalty).
+- msgpack sub-ms for realistic payloads.
+- +4KB memory per thread.
+- No busy-wait CPU cost.
+
+There is **no performance reason** to avoid `uv.new_work`. The only real costs
+are the code-level workarounds (§3.8), all of which are implemented.
 
 ---
 

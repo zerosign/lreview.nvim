@@ -250,6 +250,10 @@ function M.add_comment(c)
     conflict_remote_body = c.conflict_remote_body,
     conflict_reason = c.conflict_reason,
     conflict_detected_at = c.conflict_detected_at,
+    -- prev_state: the state before IN_FLIGHT, used for crash recovery
+    -- (item 4). Persisted so recover_in_flight can restore the exact prior
+    -- state (MODIFIED/DELETED/DRAFT) rather than always falling back to DRAFT.
+    prev_state = c.prev_state,
   }
 
   storage.execute([[
@@ -504,6 +508,23 @@ function M.count_conflicts(mo_id)
     WHERE t.mo_id = ? AND c.state = ?
   ]], mo_id, STATE.CONFLICT)
   return (rows[1] and rows[1].n) or 0
+end
+
+--- Recover any comments stuck in IN_FLIGHT state (crash recovery).
+--- If a submit was interrupted mid-flight, the comments would be left in
+--- IN_FLIGHT state. This reverts them to their previous state so they
+--- can be submitted again. Called once at startup.
+--- (Plan 07 §2.6.1 — invariant: no comments left in IN_FLIGHT on startup.)
+function M.recover_in_flight()
+  local rows = storage.query("SELECT * FROM comments WHERE state = ?", STATE.IN_FLIGHT)
+  for _, row in ipairs(rows) do
+    local decoded = decode_comment(row)
+    local prev = decoded.prev_state or STATE.DRAFT
+    decoded.state = prev
+    decoded.prev_state = nil
+    M.add_comment(decoded)
+  end
+  return #rows
 end
 
 return M

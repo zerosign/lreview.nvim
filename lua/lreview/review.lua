@@ -24,6 +24,40 @@ local M = {}
 ---@type table|nil
 M.current = nil
 
+-- ---------------------------------------------------------------------------
+-- Notification accumulation (doc 12 §3.8 / doc 09 §2.6)
+--
+-- vim.notify is nil on worker threads, so any notify() fired inside a
+-- thread-executed function (e.g. sync_review conflict warnings) would be
+-- silently lost. Instead we accumulate into M._notifications and replay them
+-- on the main thread via drain_notifications(). On the main thread (thread_mode
+-- false) we drain immediately so synchronous callers behave as before.
+-- ---------------------------------------------------------------------------
+M._notifications = {}
+local thread_mode = false
+
+--- Emit a notification. On the main thread it fires immediately; on a worker
+--- thread it is queued for replay by drain_notifications().
+---@param msg string
+---@param level integer|nil
+local function notify(msg, level)
+  M._notifications[#M._notifications + 1] = { msg = msg, level = level }
+  if not thread_mode then
+    M.drain_notifications()
+  end
+end
+
+--- Replay any queued notifications via vim.notify and clear the queue.
+function M.drain_notifications()
+  local notifs = M._notifications
+  M._notifications = {}
+  for _, n in ipairs(notifs) do
+    if vim.notify then
+      vim.notify(n.msg, n.level)
+    end
+  end
+end
+
 --- Generate a local uuid (v4-ish) for draft ids.
 ---@return string
 local function uuid()
@@ -96,11 +130,23 @@ function M.init_session(cwd)
   if not ok then
     return nil, oerr
   end
+
+  -- Crash recovery: revert any comments stuck in IN_FLIGHT state (item 4).
+  local recovered = comments.recover_in_flight()
+  if recovered > 0 and vim.notify then
+    vim.notify(string.format("lreview: recovered %d comment(s) from interrupted push", recovered), vim.log.levels.INFO)
+  end
+
   pull_request.upsert(detail)
   M.current = {
     detail = detail,
     cwd = cwd,
   }
+
+  -- Invalidate diff cache when starting a new session (branch may have changed). (item 5)
+  local sync = require("lreview.sync")
+  sync.invalidate_diff_cache(cwd)
+
   -- Auto-pull remote updates only in interactive sessions. The headless pull
   -- job sets vim.g.lreview_pull_job before calling init_session, which would
   -- otherwise spawn an unbounded chain of nested pull jobs (each job spawning
@@ -262,22 +308,16 @@ function M.compute_change_set(mo_id)
   return cs
 end
 
---- Submit the review: push draft inline comments (new threads and replies) for the current MR.
---- Only pushes inline comments; does NOT change platform review state.
----@param thread_id string|nil  -- optional thread ID to submit only comments from a single thread
----@return integer pushed, string|nil err
-function M.submit_review(thread_id)
-  if not M.current then
-    return 0, "no active review"
-  end
-
-  local detail = M.current.detail
-  local resolved = adapter.resolve(M.current.cwd)
-  if not resolved then
-    return 0, "no git remote detected"
-  end
-  local ctx = adapter.ctx(resolved, detail.number)
-
+--- Push the actual network calls for submit_review.
+--- Extracted so both main-thread and thread paths can share it.
+--- (Plan 07 §2.7 — item 3 decomposition.)
+---@param detail lreview.MRDetail
+---@param resolved table
+---@param ctx table
+---@param thread_id string|nil  -- optional filter
+---@param verdict string
+---@return integer count, string|nil err
+function M._submit_pushes(detail, resolved, ctx, thread_id, verdict)
   -- Query pending comments via storage
   local drafts = comments.get_pending_comments(detail.mo_id)
 
@@ -348,6 +388,118 @@ function M.submit_review(thread_id)
     end
   end
 
+  local count = 0
+
+  -- Mark all pending items as IN_FLIGHT before pushing, as one DB transaction
+  -- (Plan 07 §2.7 — wrap local writes, never the network).
+  local function mark_all_in_flight()
+    storage.with_transaction(function()
+      for _, nt in ipairs(new_threads_batch) do comments.mark_in_flight(nt.c_id) end
+      for _, r in ipairs(replies) do comments.mark_in_flight(r.c_id) end
+      for _, e in ipairs(edits) do comments.mark_in_flight(e.c_id) end
+      for _, dl in ipairs(deletes) do comments.mark_in_flight(dl.c_id) end
+    end)
+  end
+  mark_all_in_flight()
+
+  -- 1. Submit new threads in a batch
+  if #new_threads_batch > 0 then
+    local ok, err = resolved.adapter.submit_inline_review(resolved.cfg, ctx, detail.number, new_threads_batch, nil, { verdict = verdict })
+    if not ok then
+      for _, nt in ipairs(new_threads_batch) do comments.revert_in_flight(nt.c_id, comments.STATE.DRAFT) end
+      for _, r in ipairs(replies) do comments.revert_in_flight(r.c_id, comments.STATE.DRAFT) end
+      for _, e in ipairs(edits) do comments.revert_in_flight(e.c_id, comments.STATE.MODIFIED) end
+      for _, dl in ipairs(deletes) do comments.revert_in_flight(dl.c_id, comments.STATE.DELETED) end
+      return 0, err
+    end
+    -- Clear local drafts on success
+    for _, nt in ipairs(new_threads_batch) do
+      comments.delete_comment(nt.c_id)
+      comments.delete_thread(nt.t_id)
+    end
+    count = count + #new_threads_batch
+  end
+
+  -- 2. Push replies
+  for _, r in ipairs(replies) do
+    local comment_id, err = resolved.adapter.submit_reply(resolved.cfg, ctx, detail.number, r.reply_to_id, r.body)
+    if not comment_id then
+      comments.revert_in_flight(r.c_id, comments.STATE.DRAFT)
+      return count, err
+    end
+    comments.mark_comment_synced(r.c_id, comment_id)
+    count = count + 1
+  end
+
+  -- 3. Push edits
+  for _, e in ipairs(edits) do
+    local ok, err = resolved.adapter.update_comment(resolved.cfg, ctx, detail.number, e.remote_id, e.body)
+    if not ok then
+      comments.revert_in_flight(e.c_id, comments.STATE.MODIFIED)
+      return count, err
+    end
+    comments.mark_clean(e.c_id)
+    count = count + 1
+  end
+
+  -- 4. Push deletes
+  for _, dl in ipairs(deletes) do
+    local ok, err = resolved.adapter.delete_comment(resolved.cfg, ctx, detail.number, dl.remote_id)
+    if not ok then
+      comments.revert_in_flight(dl.c_id, comments.STATE.DELETED)
+      return count, err
+    end
+    comments.delete_comment(dl.c_id)
+    count = count + 1
+  end
+
+  return count, nil
+end
+
+--- Build the confirmation summary and verdict choice for submit_review.
+--- Runs on the main thread (UI required).
+---@param resolved table
+---@param thread_id string|nil
+---@return string|nil verdict, boolean cancelled
+local function confirm_submit(resolved, thread_id)
+  local detail = M.current.detail
+  local drafts = comments.get_pending_comments(detail.mo_id)
+  if thread_id then
+    local filtered = {}
+    for _, d in ipairs(drafts) do
+      if d.t_id == thread_id then
+        filtered[#filtered + 1] = d
+      end
+    end
+    drafts = filtered
+  end
+
+  local new_threads_batch = {}
+  local replies = {}
+  local edits = {}
+  local deletes = {}
+
+  for _, d in ipairs(drafts) do
+    if d.state == comments.STATE.DELETED then
+      deletes[#deletes + 1] = { t_id = d.t_id, c_id = d.c_id, body = d.body or "" }
+    elseif d.state == comments.STATE.MODIFIED then
+      edits[#edits + 1] = { t_id = d.t_id, c_id = d.c_id, body = d.body }
+    elseif comments.thread_is_draft(d.thread_state) then
+      new_threads_batch[#new_threads_batch + 1] = {
+        path = d.path, line = d.start_line, body = d.body,
+        t_id = d.t_id, c_id = d.c_id,
+      }
+    else
+      replies[#replies + 1] = {
+        t_id = d.t_id, c_id = d.c_id, body = d.body,
+      }
+    end
+  end
+
+  if #new_threads_batch == 0 and #replies == 0 and #edits == 0 and #deletes == 0 then
+    return nil, false
+  end
+
   -- Format confirmation summary
   local summary = { "Pending Review Changes:" }
   for _, nt in ipairs(new_threads_batch) do
@@ -367,93 +519,179 @@ function M.submit_review(thread_id)
     summary[#summary + 1] = string.format("  [Delete Note] %s", snippet)
   end
 
-  local total_pending = #new_threads_batch + #replies + #edits + #deletes
   local has_verdict = adapter.supports(resolved, "review_verdict")
-  local verdict = "COMMENT"
 
   local confirm_ui = require("lreview.ui.confirm")
   local choice_verdict = nil
 
   if vim.g.lreview_test_mode then
-    -- Headless unit test mode
-    verdict = "COMMENT"
+    return "COMMENT", false
   else
     confirm_ui.ask_confirmation(summary, { has_verdict = has_verdict }, function(choice)
       choice_verdict = choice
     end)
     if not choice_verdict then
+      return nil, true
+    end
+    return choice_verdict, false
+  end
+end
+
+--- Thread-entry point for submit_review.
+--- Executed on worker thread with an isolated Lua state.
+--- Handles the network push + reconciliation off the main thread.
+---@param db_path string
+---@param lazy_sqlite string
+---@param args table  -- { cwd, detail, thread_id, verdict }
+---@return table
+function M.submit_review_thread(db_path, lazy_sqlite, args)
+  local sqlite = require("sqlite")
+  local db = sqlite.new(db_path, { keep_open = true })
+  db:eval("PRAGMA journal_mode=WAL;")
+  db:eval("PRAGMA busy_timeout=5000;")
+
+  local old_current = M.current
+  if args and args.cwd and args.detail then
+    M.current = { cwd = args.cwd, detail = args.detail }
+  end
+
+  -- Resolve adapter on thread (uses io.popen fallback for git commands).
+  local resolved = adapter.resolve(M.current.cwd)
+  if not resolved then
+    M.current = old_current
+    db:close()
+    return { ok = false, err = "no git remote detected", notifications = {} }
+  end
+  local ctx = adapter.ctx(resolved, args.detail.number)
+
+  thread_mode = true
+  M._notifications = {}
+
+  -- Push network calls
+  local count, err = M._submit_pushes(args.detail, resolved, ctx, args.thread_id, args.verdict)
+
+  -- Reconcile after push (fetch fresh remote threads + reconcile)
+  if not err then
+    local remote_threads = M._fetch_remote_threads(args.detail, resolved, ctx)
+    if remote_threads then
+      M._reconcile_threads(args.detail, remote_threads)
+    end
+  else
+    -- On error, still reconcile to pick up any partial state
+    local remote_threads = M._fetch_remote_threads(args.detail, resolved, ctx)
+    if remote_threads then
+      M._reconcile_threads(args.detail, remote_threads)
+    end
+  end
+
+  local notifications = M._notifications
+  M._notifications = {}
+  thread_mode = false
+
+  M.current = old_current
+  db:close()
+
+  return { ok = (err == nil), count = count or 0, err = err, notifications = notifications }
+end
+
+local submit_worker = nil
+
+--- Submit the review: push draft inline comments (new threads and replies) for the current MR.
+--- Only pushes inline comments; does NOT change platform review state.
+--- Runs the network push on a worker thread. The confirmation UI runs on the
+--- main thread first. In test mode (vim.g.lreview_test_mode) the push runs
+--- synchronously on the main thread for deterministic testing. (item 3)
+---@param thread_id string|nil  -- optional thread ID to submit only comments from a single thread
+---@param callback fun(ok: boolean, count: integer, err: string|nil)|nil
+---@return integer pushed, string|nil err  -- in test mode: synchronous; async mode: returns 0, nil
+function M.submit_review(thread_id, callback)
+  if not M.current then
+    if callback then callback(false, 0, "no active review") end
+    return 0, "no active review"
+  end
+
+  local detail = M.current.detail
+  local resolved = adapter.resolve(M.current.cwd)
+  if not resolved then
+    if callback then callback(false, 0, "no git remote detected") end
+    return 0, "no git remote detected"
+  end
+
+  -- Check conflicts before showing UI
+  local conflict_count = comments.count_conflicts(detail.mo_id)
+  if conflict_count > 0 then
+    local err = string.format(
+      "%d conflict(s) must be resolved before pushing. Use :LocalReviewConflicts to review.",
+      conflict_count)
+    if callback then callback(false, 0, err) end
+    return 0, err
+  end
+
+  -- Confirmation UI (main thread)
+  local verdict, cancelled = confirm_submit(resolved, thread_id)
+  if cancelled then
+    if vim.notify then
       vim.notify("lreview: push cancelled", vim.log.levels.INFO)
-      return 0, nil
     end
-    verdict = choice_verdict
+    if callback then callback(false, 0, nil) end
+    return 0, nil
+  end
+  if not verdict then
+    if callback then callback(false, 0, "no draft, edited, or deleted comments to submit") end
+    return 0, "no draft, edited, or deleted comments to submit"
   end
 
-  local count = 0
-
-  -- Mark items as IN_FLIGHT before pushing
-  for _, nt in ipairs(new_threads_batch) do comments.mark_in_flight(nt.c_id) end
-  for _, r in ipairs(replies) do comments.mark_in_flight(r.c_id) end
-  for _, e in ipairs(edits) do comments.mark_in_flight(e.c_id) end
-  for _, dl in ipairs(deletes) do comments.mark_in_flight(dl.c_id) end
-
-  -- 1. Submit new threads in a batch
-  if #new_threads_batch > 0 then
-    local ok, err = resolved.adapter.submit_inline_review(resolved.cfg, ctx, detail.number, new_threads_batch, nil, { verdict = verdict })
-    if not ok then
-      for _, nt in ipairs(new_threads_batch) do comments.revert_in_flight(nt.c_id, comments.STATE.DRAFT) end
-      for _, r in ipairs(replies) do comments.revert_in_flight(r.c_id, comments.STATE.DRAFT) end
-      for _, e in ipairs(edits) do comments.revert_in_flight(e.c_id, comments.STATE.MODIFIED) end
-      for _, dl in ipairs(deletes) do comments.revert_in_flight(dl.c_id, comments.STATE.DELETED) end
-      M.sync_review()
-      return 0, err
-    end
-    -- Clear local drafts on success
-    for _, nt in ipairs(new_threads_batch) do
-      comments.delete_comment(nt.c_id)
-      comments.delete_thread(nt.t_id)
-    end
-    count = count + #new_threads_batch
+  -- Test mode: run synchronously on the main thread for deterministic testing.
+  if vim.g.lreview_test_mode then
+    local count, err = M._submit_pushes(detail, resolved, adapter.ctx(resolved, detail.number), thread_id, verdict)
+    -- Reconcile
+    M.sync_review()
+    if callback then callback(err == nil, count or 0, err) end
+    return count or 0, err
   end
 
-  -- 2. Push replies
-  for _, r in ipairs(replies) do
-    local comment_id, err = resolved.adapter.submit_reply(resolved.cfg, ctx, detail.number, r.reply_to_id, r.body)
-    if not comment_id then
-      comments.revert_in_flight(r.c_id, comments.STATE.DRAFT)
-      M.sync_review()
-      return count, err
-    end
-    comments.mark_comment_synced(r.c_id, comment_id)
-    count = count + 1
+  -- Normal mode: queue thread for network push (item 3).
+  if not submit_worker then
+    local thread = require("lreview.thread")
+    submit_worker = thread.create_worker("lreview.review", "submit_review_thread", function(res)
+      -- Replay notifications collected on the worker thread (item 1).
+      if res and res.notifications then
+        for _, n in ipairs(res.notifications) do
+          M._notifications[#M._notifications + 1] = n
+        end
+        M.drain_notifications()
+      end
+
+      local success = res and res.ok
+      if success then
+        -- Refresh UI via sync bus (item 6).
+        local sync = require("lreview.sync")
+        local cwd = M.current and M.current.cwd
+        if cwd then
+          sync.invalidate_diff_cache(cwd)
+        end
+        for bufnr, _ in pairs(require("lreview.ui.decor").enabled_buffers) do
+          if vim.api.nvim_buf_is_valid(bufnr) then
+            sync.mark_dirty(bufnr)
+          end
+        end
+        sync.schedule()
+      end
+
+      if callback then
+        callback(success == true, (res and res.count) or 0, res and res.err)
+      end
+    end)
   end
 
-  -- 3. Push edits
-  for _, e in ipairs(edits) do
-    local ok, err = resolved.adapter.update_comment(resolved.cfg, ctx, detail.number, e.remote_id, e.body)
-    if not ok then
-      comments.revert_in_flight(e.c_id, comments.STATE.MODIFIED)
-      M.sync_review()
-      return count, err
-    end
-    comments.mark_clean(e.c_id)
-    count = count + 1
-  end
+  submit_worker:queue({
+    cwd = M.current.cwd,
+    detail = M.current.detail,
+    thread_id = thread_id,
+    verdict = verdict,
+  })
 
-  -- 4. Push deletes
-  for _, dl in ipairs(deletes) do
-    local ok, err = resolved.adapter.delete_comment(resolved.cfg, ctx, detail.number, dl.remote_id)
-    if not ok then
-      comments.revert_in_flight(dl.c_id, comments.STATE.DELETED)
-      M.sync_review()
-      return count, err
-    end
-    comments.delete_comment(dl.c_id)
-    count = count + 1
-  end
-
-  -- Always reconcile at the end
-  M.sync_review()
-  return count, nil
+  return 0, nil
 end
 
 --- List draft comments for the current MR (for a review summary UI).
@@ -465,30 +703,42 @@ function M.list_drafts()
   return comments.draft_threads(M.current.detail.mo_id)
 end
 
---- Sync remote MR threads/comments into local storage.
---- Fetches the platform's inline comments/discussions for the current MR and
---- upserts them as synced (is_draft=0) threads. Local drafts (is_draft=1) are
---- preserved. Returns the number of remote threads synced.
----@return integer synced, string|nil err
-function M.sync_review()
-  if not M.current then
-    return 0, "no active review; run LocalReviewStart first"
-  end
-  local detail = M.current.detail
-  local resolved = adapter.resolve(M.current.cwd)
-  if not resolved then
-    return 0, "no git remote detected"
-  end
-  local ctx = adapter.ctx(resolved, detail.number)
-  local remote_threads, err = resolved.adapter.fetch_threads(resolved.cfg, ctx, detail.number, detail.mo_id)
-  if not remote_threads then
-    return 0, err
-  end
+--- Fetch remote threads/comments for an MR (network call).
+--- Separated so submit-on-thread can reuse it without duplicating the
+--- adapter interaction. (Plan 07 §2.8 — item 2 decomposition.)
+---@param detail lreview.MRDetail
+---@param resolved table
+---@param ctx table
+---@return table[]|nil remote_threads, string|nil err
+function M._fetch_remote_threads(detail, resolved, ctx)
+  return resolved.adapter.fetch_threads(resolved.cfg, ctx, detail.number, detail.mo_id)
+end
 
+--- Reconcile remote threads into local storage (batched, O(n)).
+--- Pure DB work — no network calls. Separated from fetch so both
+--- sync_review and submit_review_thread can share it.
+--- (Plan 07 §2.8.1 — ~11x faster on large MRs.)
+---@param detail lreview.MRDetail
+---@param remote_threads table[]
+---@return integer synced  -- number of remote threads processed
+function M._reconcile_threads(detail, remote_threads)
   local remote_t_ids = {}
   local remote_c_ids = {}
   local now = os.date("!%Y-%m-%dT%H:%M:%SZ")
   local n = 0
+
+  -- Batched reconcile: load all local comments for this MR once, index them in
+  -- memory by t_id -> c_id. Turns the N+1 inner-loop lookup into O(1) lookups.
+  local local_by_thread = {}
+  local local_comments = storage.query([[
+    SELECT c.*, t.path, t.line_start, t.line_end, t.state as thread_state
+    FROM comments c JOIN threads t ON c.t_id = t.t_id
+    WHERE t.mo_id = ?
+  ]], detail.mo_id)
+  for _, lc in ipairs(local_comments) do
+    local_by_thread[lc.t_id] = local_by_thread[lc.t_id] or {}
+    local_by_thread[lc.t_id][lc.c_id] = lc
+  end
 
   for _, t in ipairs(remote_threads) do
     remote_t_ids[t.t_id] = true
@@ -509,8 +759,6 @@ function M.sync_review()
       })
     elseif comments.thread_is_draft(local_t.state) then
       -- Local DRAFT thread: never overwrite it with remote data.
-      -- (A draft and a remote thread can share the same file/line but
-      --  will have different t_ids, so this branch is rare but safe.)
     else
       -- Existing synced thread: update resolved bit and payload.
       comments.create_thread({
@@ -533,35 +781,25 @@ function M.sync_review()
       -- Find our local copy by remote_id (c_id on remote == c_id in our DB
       -- once synced; for first-time arrivals, look by remote_id field).
       local local_c
-      local all_local = storage.query(
-        "SELECT * FROM comments WHERE t_id = ?", t.t_id)
-      for _, lc in ipairs(all_local) do
-        if lc.remote_id == c.remote_id or lc.c_id == c.c_id then
-          local_c = lc
-          break
+      local t_idx = local_by_thread[t.t_id]
+      if t_idx then
+        local_c = t_idx[c.c_id]
+        if not local_c then
+          for _, lc in pairs(t_idx) do
+            if lc.remote_id == c.remote_id then
+              local_c = lc
+              break
+            end
+          end
         end
       end
 
       if local_c then
-        -- Decode into Lua table (gets body, synced_body, state, etc.)
-        local lc = comments.comments_for_thread(t.t_id)
-        -- Re-find decoded version
-        local decoded_lc
-        for _, dc in ipairs(lc) do
-          if dc.c_id == (local_c.c_id) then
-            decoded_lc = dc; break
-          end
-        end
-        -- Also check DELETED state which is filtered out of comments_for_thread
-        if not decoded_lc then
-          -- Might be DELETED — fetch directly
-          local raw = storage.query("SELECT * FROM comments WHERE c_id = ?", local_c.c_id)
-          if raw[1] then
-            -- manually decode
-            local mpack_payload = raw[1].payload and vim.mpack.decode(raw[1].payload) or {}
-            decoded_lc = vim.tbl_extend("force", raw[1], mpack_payload)
-            decoded_lc.payload = nil
-          end
+        local decoded_lc = local_c
+        if decoded_lc.payload then
+          local mpack_payload = vim.mpack.decode(decoded_lc.payload) or {}
+          decoded_lc = vim.tbl_extend("force", decoded_lc, mpack_payload)
+          decoded_lc.payload = nil
         end
 
         if decoded_lc then
@@ -570,7 +808,6 @@ function M.sync_review()
           if lstate == comments.STATE.DRAFT then
             -- DRAFT: never overwrite.
           elseif lstate == comments.STATE.SYNCED then
-            -- Clean local copy: remote is authoritative, update body + meta.
             comments.add_comment({
               c_id = c.c_id,
               t_id = t.t_id,
@@ -582,37 +819,28 @@ function M.sync_review()
               state = comments.STATE.SYNCED,
             })
           elseif lstate == comments.STATE.MODIFIED then
-            -- We have a pending local edit. Check if remote changed the base.
             local synced_body = decoded_lc.synced_body
             if c.body ~= synced_body then
-              -- Remote changed it too → CONFLICT.
               comments.mark_comment_conflict(decoded_lc.c_id, c.body, "remote_edited")
-              vim.notify(
+              notify(
                 string.format("lreview: conflict on %s:%d — remote edited a comment you are editing",
                   t.path, t.start_line or 0),
                 vim.log.levels.WARN)
             end
-            -- else: remote base unchanged, keep MODIFIED — nothing to do.
           elseif lstate == comments.STATE.DELETED then
-            -- We want to delete it; check if remote changed the base.
             local synced_body = decoded_lc.synced_body
             if c.body ~= synced_body then
-              -- Remote modified something we intend to delete → CONFLICT.
               comments.mark_comment_conflict(decoded_lc.c_id, c.body, "remote_edited")
-              vim.notify(
+              notify(
                 string.format("lreview: conflict on %s:%d — remote edited a comment you deleted",
                   t.path, t.start_line or 0),
                 vim.log.levels.WARN)
             end
-            -- else: remote unchanged, keep DELETED state — push will do the delete.
           elseif lstate == comments.STATE.CONFLICT then
-            -- Already in conflict — update the stored remote_body snapshot
-            -- in case a newer remote version arrived.
             comments.mark_comment_conflict(decoded_lc.c_id, c.body, decoded_lc.conflict_reason or "remote_edited")
           end
         end
       else
-        -- First time we see this comment: insert as SYNCED.
         comments.add_comment({
           c_id = c.c_id,
           t_id = t.t_id,
@@ -628,10 +856,7 @@ function M.sync_review()
     n = n + 1
   end
 
-  -- ─── Handle remote-side deletions ───────────────────────────────────────
-  -- For every local comment that has a remote_id but is no longer in the
-  -- remote response: the remote deleted it.
-
+  -- Handle remote-side deletions
   local all_synced = storage.query([[
     SELECT c.c_id, c.remote_id, c.state, c.payload, t.path, t.line_start
     FROM comments c
@@ -641,33 +866,26 @@ function M.sync_review()
 
   for _, ec in ipairs(all_synced or {}) do
     if not remote_c_ids[ec.remote_id] then
-      local payload = ec.payload and vim.mpack.decode(ec.payload) or {}
       local lstate = ec.state
 
       if lstate == comments.STATE.SYNCED then
-        -- Clean local copy deleted remotely → hard delete locally too.
         comments.delete_comment(ec.c_id)
       elseif lstate == comments.STATE.MODIFIED then
-        -- We had a pending edit but remote deleted it → CONFLICT.
         comments.mark_comment_conflict(ec.c_id, "", "remote_deleted")
-        vim.notify(
+        notify(
           string.format("lreview: conflict on %s:%d — remote deleted a comment you are editing",
             ec.path or "?", ec.line_start or 0),
           vim.log.levels.WARN)
       elseif lstate == comments.STATE.DELETED then
-        -- Both sides want it gone: hard delete (agree).
         comments.delete_comment(ec.c_id)
-        -- (No CONFLICT — both sides agree on deletion.)
       end
-      -- DRAFT and CONFLICT states: leave them alone.
     end
   end
 
-  -- ─── Handle threads deleted on the remote ───────────────────────────────
+  -- Handle threads deleted on the remote
   local all_local_threads = comments.threads_for_mr(detail.mo_id)
   for _, lt in ipairs(all_local_threads) do
     if not comments.thread_is_draft(lt.state) and not remote_t_ids[lt.t_id] then
-      -- Remote deleted this thread. Check for orphaned local drafts.
       local draft_children = storage.query([[
         SELECT COUNT(*) as n FROM comments WHERE t_id = ? AND state = ?
       ]], lt.t_id, comments.STATE.DRAFT)
@@ -675,7 +893,7 @@ function M.sync_review()
 
       if has_orphaned_drafts then
         comments.mark_thread_conflict(lt.t_id, "remote_deleted_has_drafts")
-        vim.notify(
+        notify(
           string.format("lreview: conflict — thread on %s deleted remotely but you have unsent replies",
             lt.path or "?"),
           vim.log.levels.WARN)
@@ -685,7 +903,29 @@ function M.sync_review()
     end
   end
 
-  return n, nil
+  return n
+end
+
+--- Sync remote MR threads/comments into local storage.
+--- Fetches the platform's inline comments/discussions for the current MR and
+--- upserts them as synced (is_draft=0) threads. Local drafts (is_draft=1) are
+--- preserved. Returns the number of remote threads synced.
+---@return integer synced, string|nil err
+function M.sync_review()
+  if not M.current then
+    return 0, "no active review; run LocalReviewStart first"
+  end
+  local detail = M.current.detail
+  local resolved = adapter.resolve(M.current.cwd)
+  if not resolved then
+    return 0, "no git remote detected"
+  end
+  local ctx = adapter.ctx(resolved, detail.number)
+  local remote_threads, err = M._fetch_remote_threads(detail, resolved, ctx)
+  if not remote_threads then
+    return 0, err
+  end
+  return M._reconcile_threads(detail, remote_threads)
 end
 
 --- List available MR/PR templates for the current repo.
@@ -899,6 +1139,8 @@ end
 
 --- Thread-entry point for sync_review.
 --- Executed on worker thread with an isolated Lua state.
+--- Returns notifications collected during sync_review so they can be
+--- replayed on the main thread. (doc 12 §3.8 / doc 09 §2.6 — item 1.)
 ---@param db_path string
 ---@param lazy_sqlite string
 ---@param args table  -- { cwd, detail }
@@ -917,21 +1159,28 @@ function M.sync_review_thread(db_path, lazy_sqlite, args)
     }
   end
 
+  thread_mode = true
+  M._notifications = {}
   local count, err = M.sync_review()
+  local notifications = M._notifications
+  M._notifications = {}
+  thread_mode = false
 
   M.current = old_current
   db:close()
 
   if err then
-    return { ok = false, err = err }
+    return { ok = false, err = err, notifications = notifications }
   end
-  return { ok = true, count = count }
+  return { ok = true, count = count, notifications = notifications }
 end
 
 local thread_worker = nil
 
 --- Fetch remote reviews asynchronously (non-blocking).
 --- Runs sync_review on a libuv thread with MessagePack serialization.
+--- Notifications collected on the thread are replayed here on the main thread.
+--- Uses the sync-bus for UI refresh instead of direct refresh. (items 1, 5, 6)
 ---@param callback fun(success: boolean)|nil
 ---@return boolean, string|nil
 function M.pull_review_async(callback)
@@ -945,20 +1194,27 @@ function M.pull_review_async(callback)
     thread_worker = thread.create_worker("lreview.review", "sync_review_thread", function(res)
       local success = res and res.ok
       if success then
-        local decor = require("lreview.ui.decor")
-        for bufnr, _ in pairs(decor.enabled_buffers) do
+        -- Replay notifications collected on the worker thread (item 1).
+        if res.notifications then
+          for _, n in ipairs(res.notifications) do
+            M._notifications[#M._notifications + 1] = n
+          end
+          M.drain_notifications()
+        end
+
+        -- Invalidate diff cache after pull (item 5) and use sync-bus
+        -- for UI refresh instead of direct refresh (item 6).
+        local sync = require("lreview.sync")
+        local cwd = M.current and M.current.cwd
+        if cwd then
+          sync.invalidate_diff_cache(cwd)
+        end
+        for bufnr, _ in pairs(require("lreview.ui.decor").enabled_buffers) do
           if vim.api.nvim_buf_is_valid(bufnr) then
-            decor.refresh(bufnr)
+            sync.mark_dirty(bufnr)
           end
         end
-        local tv = require("lreview.ui.thread_view")
-        if tv.state and vim.api.nvim_buf_is_valid(tv.state.bufnr) then
-          tv.redraw()
-        end
-        local summary = require("lreview.ui.summary")
-        if summary.state and vim.api.nvim_buf_is_valid(summary.state.bufnr) then
-          summary.redraw()
-        end
+        sync.schedule()
       end
       if callback and type(callback) == "function" then
         callback(success == true)

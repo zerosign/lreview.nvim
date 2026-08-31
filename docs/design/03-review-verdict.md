@@ -2,6 +2,7 @@
 
 **Journey:** A 6 (Submit the review)
 **Domain:** 2 — Reviewing UX
+**Status:** ✅ **Implemented** — `ui/confirm.lua` (floating confirmation popup) + verdict picker (APPROVE/COMMENT/REQUEST_CHANGES), capability-gated
 
 ---
 

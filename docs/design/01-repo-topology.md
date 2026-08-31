@@ -2,6 +2,7 @@
 
 **Journey:** A 0→1 (Query → Open an MR) and B 0 (create a branch for new work)
 **Domain:** 1 — Repo Topology & Branch Materialization
+**Status:** ✅ **Implemented** — `materialize.lua` (`resolve_mode` checkout/worktree, `materialize_branch`) + worktree/branch helpers
 
 ---
 

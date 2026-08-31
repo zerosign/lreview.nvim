@@ -9,6 +9,12 @@ print("=========================================================================
 local cwd = vim.fn.getcwd()
 local sample_file = "lua/lreview/init.lua"
 
+-- Simulate a real review session so the diff cache resolves the target branch
+-- from review.current (avoids the git.default_branch fallback that only runs
+-- when no review is active — a non-production path).
+local review = require("lreview.review")
+review.current = { cwd = cwd, detail = { target_branch = "master" } }
+
 -- Benchmark 1: Uncached git.changed_lines vs Cached sync.get_changed_lines
 local iters = 100
 

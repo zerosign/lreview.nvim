@@ -161,8 +161,10 @@ function M.refresh(bufnr)
   end
 
   -- Highlight diff changes (added/modified lines in MR)
+  -- Use async path: if the cache is populated, apply highlights immediately;
+  -- otherwise kick off a background thread and re-refresh when done. (item 7)
   local sync = require("lreview.sync")
-  local changed = sync.get_changed_lines(review.current.cwd, rel_path)
+  local changed = sync.get_changed_lines_cached(review.current.cwd, rel_path)
   if changed then
     for line_num, _ in pairs(changed) do
       local l_idx = line_num - 1
@@ -171,6 +173,9 @@ function M.refresh(bufnr)
         priority = 50,
       })
     end
+  else
+    -- Cache miss: compute on worker thread; re-refresh buffer when done.
+    sync.get_changed_lines_async(review.current.cwd, rel_path, bufnr)
   end
 end
 

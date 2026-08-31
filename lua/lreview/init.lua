@@ -266,12 +266,13 @@ end
 
 local function cmd_submit()
   if not ensure_review_started() then return end
-  local pushed, err = review.submit_review()
-  if err then
-    vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-    return
-  end
-  vim.notify("lreview: submitted " .. pushed .. " inline comment(s)", vim.log.levels.INFO)
+  review.submit_review(nil, function(ok, count, err)
+    if err then
+      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+      return
+    end
+    vim.notify("lreview: submitted " .. count .. " inline comment(s)", vim.log.levels.INFO)
+  end)
 end
 
 local function cmd_pull()

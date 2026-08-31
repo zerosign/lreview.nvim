@@ -11,6 +11,7 @@ local clib
 local uv = vim.uv or vim.loop
 
 local gc_work = uv.new_work(function(db_path, lazy_sqlite, age_days)
+  rawset(vim, "g", {})
   if lazy_sqlite and lazy_sqlite ~= "" then
     package.path = package.path .. ";" .. lazy_sqlite .. "/?.lua;" .. lazy_sqlite .. "/?/init.lua"
   end
@@ -18,7 +19,7 @@ local gc_work = uv.new_work(function(db_path, lazy_sqlite, age_days)
   if not ok then
     return "sqlite not available: " .. tostring(sqlite)
   end
-  local db = sqlite.new(db_path)
+  local db = sqlite.new(db_path, { keep_open = true })
   if not db then
     return "failed to open sqlite db: " .. tostring(db_path)
   end

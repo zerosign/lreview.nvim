@@ -2,6 +2,17 @@
 
 **Area:** Core engine robustness (`review.lua`)
 **Domain:** 4 — Correctness & Maintainability
+**Status:** ⚠️ **Partially implemented — IN_FLIGHT + txn + batched reconcile done; submit-on-thread + decomposition not done**
+
+> **Implementation status (rediscovered):** the **`IN_FLIGHT` state** +
+> `mark_in_flight`/`revert_in_flight`, the **`with_transaction` wrapper**, the
+> **`compute_change_set`**, and the **batched reconcile** (single query +
+> in-memory index, the ~11x doc-10 win) are all **implemented**. The bulk
+> `mark_in_flight` block runs inside `with_transaction` (Plan 07 §2.7). **Not
+> done:** (1) `submit_review` still runs **synchronously on the main thread**
+> (not on `uv.new_work`), (2) `sync_review` is **not decomposed** into
+> `_sync_threads`/`_reconcile_*` (still one ~220-line function), (3) no
+> `IN_FLIGHT` crash recovery on startup. See §8.
 
 ---
 
@@ -682,3 +693,40 @@ sync_review() → _sync_threads + _reconcile_remote_comment_deletions
 5. For partial-failure feedback, should the per-item errors be **aggregated into
    one notification** or **one notification per failed item**? (Aggregated is
    less noisy; per-item is more actionable.)
+
+---
+
+## 8. Implementation Status (rediscovered)
+
+### 8.1 Implemented (verified in source)
+
+| Piece | Location | Notes |
+|:--|:--|:--|
+| `IN_FLIGHT` state | `storage/comments.lua` | `mark_in_flight` / `revert_in_flight` |
+| `with_transaction` wrapper | `storage/init.lua` | `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK` |
+| `compute_change_set` | `review.lua` | Typed `{additions, replies, updates, deletions}` |
+| Batched reconcile | `review.lua` `sync_review` | Single query + in-memory `local_by_thread` index (doc 10 ~11x win) |
+| `mark_in_flight` in txn | `review.lua` | Bulk `mark_in_flight` wrapped in `with_transaction` (Plan 07 §2.7) |
+
+### 8.2 Remaining work (in priority order)
+
+1. **Move `submit_review` to a thread** (doc 07 §2.5). Currently synchronous on
+   main thread — blocks UI during the push loop. Needs a `submit_review_thread`
+   entry (like `sync_review_thread`) + `pull_review_async`-style wrapper using
+   `thread.create_worker`. **Depends on** #2 (decomposition) so the pure core is
+   separable from `vim.notify`.
+2. **Decompose `sync_review` monolith** (doc 07 §2.2) into
+   `_sync_threads` / `_reconcile_remote_comment_deletions` /
+   `_reconcile_remote_thread_deletions`. Improves testability + enables #1.
+3. **`IN_FLIGHT` crash recovery on startup.** No code reverts orphaned
+   `IN_FLIGHT` states left by a crash mid-push (doc 07 §2.6.1 invariant: "must
+   never persist across a crash"). Add a startup pass that reverts any
+   `IN_FLIGHT` item to its prior state.
+
+### 8.3 Verification checklist
+
+- [ ] `submit_review` runs on a thread (UI stays responsive during push)
+- [ ] `sync_review` decomposed into `_sync_threads` + `_reconcile_*`
+- [ ] `IN_FLIGHT` items reverted on startup (crash recovery)
+- [ ] Partial failure still reconciles + shows per-item feedback
+- [ ] Retry is idempotent (pushed items drop out of change-set)

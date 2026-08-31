@@ -2,6 +2,7 @@
 
 **Journey:** A 2 (Browse the diff / understand changes)
 **Domain:** 2 — Reviewing UX
+**Status:** ✅ **Implemented** — `ui/summary.lua` (dual threads/files view, sort cycle, `win_w`-dynamic columns)
 
 ---
 

@@ -11,6 +11,21 @@ function M.test_worker(db_path, lazy_sqlite, args)
   }
 end
 
+--- Test worker that simulates collecting notifications (item 1 test helper).
+--- Simulates what sync_review_thread does: collect notify calls into a list
+--- and return them in the payload.
+function M.test_worker_notify(db_path, lazy_sqlite, args)
+  -- Simulate thread_mode notifications (like review.sync_review does)
+  local notifications = {
+    { msg = "notify-test-1", level = 1 },
+    { msg = "notify-test-2", level = 2 },
+  }
+  return {
+    ok = true,
+    notifications = notifications,
+  }
+end
+
 --- Create a thread worker wrapper that handles environment bootstrap,
 --- dynamic module resolution on the worker thread, MessagePack serialization,
 --- and scheduled callback dispatch.

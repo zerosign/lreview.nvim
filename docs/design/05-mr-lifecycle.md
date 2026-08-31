@@ -2,6 +2,7 @@
 
 **Journey:** B 2 (Create the MR/PR)
 **Domain:** 3 — Requesting Review UX
+**Status:** ✅ **Implemented** — `ui/detail_editor.lua` (scratchpad body editor) + `LocalReviewCreate` (template picker, source/target branch, new branch)
 
 ---
 

@@ -2,6 +2,16 @@
 
 **Journey:** A 7 (Track review state / panel & status sync)
 **Domain:** 2 — Reviewing UX
+**Status:** ⚠️ **Partially implemented — core bus exists, 2 wiring gaps remain**
+
+> **Implementation status (rediscovered):** `lua/lreview/sync.lua` is
+> **implemented** — `mark_dirty`, debounced `schedule` (uv timer + `vim.schedule`),
+> `flush`, `subscribe`, and the in-memory `diff_cache` with `get_changed_lines`
+> + `invalidate_diff_cache`. **Two gaps remain:** (1) `invalidate_diff_cache` is
+> **never called** (no invalidation on pull/branch change → stale highlights),
+> and (2) `pull_review_async`'s callback **bypasses the bus** — it manually calls
+> `decor.refresh`/`tv.redraw`/`summary.redraw` instead of `mark_dirty`+`flush_now`.
+> See §11.
 
 ---
 
@@ -504,3 +514,43 @@ handle_action("resolve")
    a first-refresh cache-miss block?
 6. Should the sync bus expose a `flush_now()` for high-priority events (pull
    completion, explicit user action), or always debounce?
+
+---
+
+## 11. Implementation Status (rediscovered)
+
+The sync bus is **implemented** in `lua/lreview/sync.lua`. This section records
+what exists vs the two remaining wiring gaps.
+
+### 11.1 Implemented (verified in source)
+
+| Piece | Location | Notes |
+|:--|:--|:--|
+| `mark_dirty(bufnr)` | `sync.lua` L59 | Marks dirty + `schedule(80)` |
+| Debounced `schedule` | `sync.lua` L77 | `uv.new_timer`, `:stop()`/`:start()`, `vim.schedule` → `flush` |
+| `flush()` | `sync.lua` L96 | Refreshes dirty buffers + notifies `panel`/`decor` subscribers |
+| `subscribe(kind, fn)` | `sync.lua` L69 | `panel` / `decor` subscriber lists |
+| Diff cache | `sync.lua` L11, L27 | `get_changed_lines(cwd, path)` + `invalidate_diff_cache(cwd)` |
+| `git.changed_lines` arg fix | `sync.lua` L49 | Resolves target_branch, calls `changed_lines(target, path, cwd)` |
+
+### 11.2 Remaining gaps
+
+1. **Diff-cache invalidation never wired.** `invalidate_diff_cache()` exists
+   (L15) but is **never called**. It must be called:
+   - On pull completion (in `pull_review_async` callback).
+   - On branch change / new session (in `LocalReviewStart`).
+   Without this, highlights go stale after a pull or branch switch.
+2. **`pull_review_async` bypasses the bus.** `review.lua` L959-977 manually
+   iterates `decor.enabled_buffers` + calls `tv.redraw()` + `summary.redraw()`
+   instead of going through `sync.mark_dirty(all)` + `sync.flush_now()`. This
+   duplicates the bus logic and skips the diff-cache invalidation. Fix: replace
+   the manual refresh with `sync.invalidate_diff_cache(cwd)` +
+   `sync.mark_dirty(bufnr)` for each enabled buffer + `sync.flush_now()`.
+
+### 11.3 Verification checklist
+
+- [ ] `invalidate_diff_cache` called on pull completion
+- [ ] `invalidate_diff_cache` called on branch change / session start
+- [ ] `pull_review_async` callback routes through `sync.mark_dirty` + `flush_now`
+- [ ] Panels still refresh after pull (no regression)
+- [ ] Highlights not stale after pull/branch switch

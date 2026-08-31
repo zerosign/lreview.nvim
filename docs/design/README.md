@@ -31,7 +31,7 @@ All issues discussed are grouped into **four problem domains**:
 | Doc | Issue | Journey |
 |:----|:------|:--------|
 | [05-mr-lifecycle.md](05-mr-lifecycle.md) | Formalize MR lifecycle contract + body editor | B 2 |
-| [06-reviewer-assignment.md](06-reviewer-assignment.md) | Offline-first reviewer assignment via local user index — **deprioritized (enhancement/feature)** | B 3 |
+| [06-reviewer-assignment.md](06-reviewer-assignment.md) | Offline-first reviewer assignment via local user index — **implemented** | B 3 |
 
 ### Domain 4 — Correctness & Maintainability
 *Core engine robustness (from the initial architecture review).*
@@ -47,14 +47,28 @@ All issues discussed are grouped into **four problem domains**:
 | Doc | Issue | Used by |
 |:----|:------|:--------|
 | [08-capability-system.md](08-capability-system.md) | Adapter capability flags for multiplatform-safe features | Docs 03, 05, 06, 07 |
-| [09-async-model.md](09-async-model.md) | Async execution model: subprocess vs. thread vs. async refactor — **decided: `uv.new_work` thread**; §8 extends it to all blocking I/O (`git.changed_lines`, network calls) | 04-sync-bus.md |
+| [09-async-model.md](09-async-model.md) | Async execution model: subprocess vs. thread vs. async refactor — **decided + confirmed: `uv.new_work` thread**; §8 extends it to all blocking I/O (`git.changed_lines`, network calls) | 04-sync-bus.md |
 | [10-benchmark.md](10-benchmark.md) | SQLite query benchmark across files/threads-per-file/pending-changes; confirms N+1 reconcile is the lag source, batching is ~11x, transactions are negligible, bitmap rejected | 07-submit-atomicity.md |
-| [11-plan-verification.md](11-plan-verification.md) | Per-plan test strategy (scenarios, checkpoints, risks, regressions, edge cases) + cross-plan conflict map (C1–C6) + implementation order | all plans |
-| [12-async-audit.md](12-async-audit.md) | **Empirical audit** of `uv.new_work` threads vs `vim._async` coroutines in headless nvim: thread `vim` proxy limits, sqlite.lua workarounds, no object sharing (isolated/safe), JSON serialization, `vim._async` internal-API risk, hybrid option | 09-async-model.md |
+| [11-plan-verification.md](11-plan-verification.md) | Per-plan test strategy (scenarios, checkpoints, risks, regressions, edge cases) + cross-plan conflict map (C1–C6) + implementation order + **§14 implementation status** | all plans |
+| [12-async-audit.md](12-async-audit.md) | **Empirical audit** of `uv.new_work` threads vs `vim._async` coroutines in headless nvim: thread `vim` proxy limits, sqlite.lua workarounds, no object sharing (isolated/safe), msgpack serialization, `vim._async` internal-API risk, hybrid option — **resolved: every restriction has a verified solution (§3.8), overheads negligible (§9)** | 09-async-model.md |
+
+## Implementation Status (as of rediscovery)
+
+- **Implemented:** docs 01, 02, 03, 05, 06, 08; thread model core (09) — `thread.lua`, `base.lua` io.popen, `sync_review_thread`, `pull_review_async`, `gc_work` fix.
+- **Partially implemented:** doc 04 (sync-bus core done; diff-cache invalidation + bus-bypass remain), doc 07 (`IN_FLIGHT` + txn + batched reconcile done; submit-on-thread + decomposition + crash recovery remain).
+- **Remaining work (consolidated):** `vim.notify` replay from thread, `sync_review` decomposition, submit-on-thread, `IN_FLIGHT` crash recovery, diff-cache invalidation, sync-bus bypass fix, `git.changed_lines` on thread. See doc 11 §14.
 
 ## Recommended Implementation Order
 
-The domains are largely independent, but there are dependencies *within* each:
+> **Update:** most plans are now **implemented**. The remaining work is
+> consolidated in doc 11 §14.3/§14.4. The recommended next order is:
+> 1. `vim.notify` replay from thread + `sync_review` decomposition (07/09)
+> 2. submit-on-thread (07)
+> 3. `IN_FLIGHT` crash recovery (07)
+> 4. sync-bus wiring: diff-cache invalidation + bus-bypass fix (04)
+> 5. `git.changed_lines` on thread (09 §8.3/B)
+
+The original dependency-ordered plan (for reference):
 
 1. **Domain 4 (correctness)** first — it's the foundation and lowest risk.
    - `07-submit-atomicity.md` (partial-failure data integrity)
@@ -69,9 +83,7 @@ The domains are largely independent, but there are dependencies *within* each:
    - then `02-file-overview.md`, `03-review-verdict.md`
 5. **Domain 3 (requesting UX)** — independent, can be parallel.
    - `05-mr-lifecycle.md` first (core create/update/close flow)
-   - `06-reviewer-assignment.md` **deprioritized** — it's an enhancement/feature,
-     not a core fix. Design stays valid (offline-first via local user index +
-     `uv.new_work`), but implement only after the higher-priority plans above.
+   - `06-reviewer-assignment.md` — now **implemented**.
 
 ## Cross-Cutting Principles
 

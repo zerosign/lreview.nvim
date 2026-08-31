@@ -6,6 +6,14 @@
 > flags **cross-plan conflicts** — places where two plans disagree or depend on
 > each other in ways that could break if implemented independently.
 
+> **✅ Implementation status (rediscovered):** docs 01, 02, 03, 05, 06, 08 are
+> **implemented**; doc 04 (sync-bus) and doc 07 (submit atomicity) are
+> **partially implemented** (see their status headers); doc 09's thread model is
+> **largely implemented** (`thread.lua`, `base.lua` io.popen, `sync_review_thread`).
+> The **remaining work** is concentrated in: submit-on-thread (07), `sync_review`
+> decomposition (07), notification replay (09), diff-cache invalidation + bus
+> bypass (04), and `IN_FLIGHT` crash recovery (07). See §14.
+
 ---
 
 ## 0. Cross-Plan Dependency Map
@@ -314,12 +322,11 @@ Thread safety, notification deferral, adapter resolution on main thread, DB conn
 
 ### Risks / Regressions
 - **Risk (C1/C2):** RESOLVED — Doc 04 migrated to the thread model.
-- **⚠️ Risk (12-async-audit):** `uv.new_work` threads have a limited `vim`
-  proxy (no `vim.g`/`vim.fn`/`vim.system`/`vim.schedule`/`vim.notify`), no
-  table/function/cdata args (must JSON-serialize), and sqlite.lua needs 2
-  workarounds (`rawset(vim, "g", {})` + `keep_open = true`). The existing
-  `gc_work` thread is **currently broken** (lazy-open). See
-  [12-async-audit.md](12-async-audit.md) — re-verify the thread decision.
+- **✅ Risk (12-async-audit):** RESOLVED — every `uv.new_work` restriction has a
+  verified solution (doc 12 §3.8): `rawset(vim,"g",{})` + `keep_open` for
+  sqlite, msgpack for data, `io.popen` for subprocess, `vim.schedule` for the
+  fast-event-context callback. The `gc_work` thread is **fixed**. The thread
+  decision is **confirmed**. See [12-async-audit.md](12-async-audit.md).
 - **Regression:** any code that assumed subprocess (`pull_review_async`, `pull_users_async`) — all migrate to threads.
 - **Edge:** thread crash isolation (pcall-guarded); GC thread + submit thread both writing (WAL handles).
 
@@ -389,3 +396,46 @@ When implementing plan X, which other plans could break?
    recovery testing (S7.4).
 5. **Doc 04 open Q4:** Flush pending while pull completes — `flush_now()`
    semantics need a defined behavior.
+
+---
+
+## 14. Implementation Status (rediscovered — what's done vs remaining)
+
+### 14.1 Fully implemented
+
+| Doc | Module(s) | Notes |
+|:--|:--|:--|
+| 01 | `materialize.lua` | `resolve_mode` (checkout/worktree), `materialize_branch` |
+| 02 | `ui/summary.lua` | Dual threads/files view, sort cycle, `win_w`-dynamic columns |
+| 03 | `ui/confirm.lua`, `review.lua` | Floating confirm popup, verdict picker, capability-gated |
+| 05 | `ui/detail_editor.lua`, `init.lua` | Scratchpad body editor, `LocalReviewCreate` |
+| 06 | `review.lua`, adapters | `assign_reviewers`, `LocalReviewRequestReview`, offline cache |
+| 08 | `adapter/init.lua`, `adapter/base.lua` | `default_capabilities`, `M.supports()`, overrides |
+
+### 14.2 Partially implemented
+
+| Doc | Done | Remaining |
+|:--|:--|:--|
+| 04 (sync-bus) | `sync.lua` core (mark_dirty, debounce, flush, subscribe, diff cache) | Diff-cache invalidation never wired; `pull_review_async` bypasses bus |
+| 07 (submit) | `IN_FLIGHT`, `with_transaction`, `compute_change_set`, batched reconcile | Submit-on-thread; `sync_review` decomposition; `IN_FLIGHT` crash recovery |
+| 09 (async) | `thread.lua`, `base.lua` io.popen, `sync_review_thread`, `pull_review_async`, `gc_work` fix | `vim.notify` replay from thread; `git.changed_lines` on thread |
+
+### 14.3 The consolidated remaining-work list (all plans)
+
+1. **`vim.notify` replay from thread callback** (09/12) — currently silently
+   lost on the worker thread. **Correctness bug.**
+2. **`sync_review` decomposition** (07 §2.2) — enables submit-on-thread.
+3. **Submit-on-thread** (07 §2.5) — `submit_review_thread` + wrapper.
+4. **`IN_FLIGHT` crash recovery on startup** (07 §2.6.1).
+5. **Diff-cache invalidation wiring** (04) — on pull + branch change.
+6. **Sync-bus bypass fix** (04) — `pull_review_async` → `mark_dirty`+`flush_now`.
+7. **`git.changed_lines` on thread** (09 §8.3/B) — biggest UI-latency win.
+
+### 14.4 Recommended next implementation order
+
+1. **#1 + #2** (notification replay + decomposition) — one coherent unit in
+   `sync_review`, unblocks submit-on-thread.
+2. **#3** (submit-on-thread) — depends on #1/#2.
+3. **#4** (IN_FLIGHT recovery) — small, independent.
+4. **#5 + #6** (sync-bus wiring) — doc 04 completion.
+5. **#7** (`git.changed_lines` threaded) — biggest perf win, independent.

@@ -309,22 +309,24 @@ local function handle_action(action)
     end
   elseif action == "push_selected" then
     vim.notify("lreview: submitting selected thread changes...", vim.log.levels.INFO)
-    local count, err = review.submit_review(thread.t_id)
-    if err then
-      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-    else
-      vim.notify(string.format("lreview: successfully pushed %d comment(s)", count), vim.log.levels.INFO)
-      sync.schedule()
-    end
+    review.submit_review(thread.t_id, function(ok, count, err)
+      if err then
+        vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+      else
+        vim.notify(string.format("lreview: successfully pushed %d comment(s)", count), vim.log.levels.INFO)
+        sync.schedule()
+      end
+    end)
   elseif action == "push_all" then
     vim.notify("lreview: submitting all local changes...", vim.log.levels.INFO)
-    local count, err = review.submit_review()
-    if err then
-      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-    else
-      vim.notify(string.format("lreview: successfully pushed %d comment(s)", count), vim.log.levels.INFO)
-      sync.schedule()
-    end
+    review.submit_review(nil, function(ok, count, err)
+      if err then
+        vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+      else
+        vim.notify(string.format("lreview: successfully pushed %d comment(s)", count), vim.log.levels.INFO)
+        sync.schedule()
+      end
+    end)
   elseif action == "pull" then
     vim.notify("lreview: pulling remote updates...", vim.log.levels.INFO)
     review.pull_review_async(function(success)
@@ -354,12 +356,13 @@ local function handle_action(action)
       return
     end
     vim.notify("lreview: submitting request changes verdict...", vim.log.levels.INFO)
-    local count, err = review.submit_review()
-    if err then
-      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-    else
-      sync.schedule()
-    end
+    review.submit_review(nil, function(ok, count, err)
+      if err then
+        vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+      else
+        sync.schedule()
+      end
+    end)
   end
 end
 

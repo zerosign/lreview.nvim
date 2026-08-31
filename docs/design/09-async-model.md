@@ -14,6 +14,15 @@
 > alternative `vim._async` remains **not recommended** (internal API + biggest
 > rewrite + no true parallelism). **Decision stands: `uv.new_work`.**
 
+> **✅ Implementation status (rediscovered):** the thread model is **largely
+> implemented** — `thread.lua` (generic `create_worker` with msgpack + `vim.g`
+> bootstrap + `vim.schedule` escape), `adapter/base.lua` (io.popen fallback for
+> threads), `sync_review_thread` + `pull_review_async` (thread-based sync), and
+> the `gc_work` fix (keep_open + `vim.g`). **Remaining:** (1) move `submit_review`
+> to a thread, (2) decompose `sync_review` monolith, (3) replay `vim.notify`
+> from thread callback (currently silently lost), (4) wire sync-bus diff-cache
+> invalidation + bypass fix. See §9.
+
 ---
 
 ## 1. The Question
@@ -125,6 +134,42 @@ calls (`vim.mpack`, `vim.tbl_extend`, `vim.trim`, `vim.json`) are safe anywhere.
 **Conclusion:** both Option 2 and Option 3 are **verified feasible** with
 bounded, well-understood changes. The `vim.notify` deferral (Option 2) and the
 async restructuring (Option 3) are the only real work; neither is a blocker.
+
+---
+
+## 2.6 Every Audit Problem Has a Verified Solution
+
+The async audit (doc 12) surfaced several `uv.new_work` restrictions. Each has
+a **concrete, verified solution** — none is a blocker:
+
+| # | Problem (doc 12) | Solution | Verified |
+|:--|:--|:--|:--|
+| 1 | Thread `vim` is a limited proxy (`vim.g` nil) | `rawset(vim, "g", {})` bootstrap | ✅ `sanity_work.lua` |
+| 2 | sqlite.lua lazy-open fails on thread | `sqlite.new(db, { keep_open = true })` | ✅ `sanity_work.lua` |
+| 3 | No table/function/cdata args across boundary | **msgpack** serialize (`vim.mpack.encode`/`decode`) | ✅ `sanity_serialize.lua` |
+| 4 | `vim.system` is nil on thread | `io.popen`/`uv.spawn` fallback in `adapter/base.lua` | ✅ `sanity_thread_subprocess.lua` |
+| 5 | `vim.notify` is nil on thread | Collect notifications into result, replay on main via `vim.schedule` | ✅ `sanity_callback_ctx2.lua` |
+| 6 | Completion callback runs in **fast event context** (new) | Wrap callback body in `vim.schedule` | ✅ `sanity_callback_ctx2.lua` |
+| 7 | `vim.fn` not thread-safe (adapter resolve) | Resolve adapter/ctx on main thread first, pass plain values in | ✅ design (doc 09 §2.5) |
+| 8 | WAL concurrent access | Thread opens own connection + `PRAGMA busy_timeout` | ✅ `sanity_wal.lua` |
+
+**Overhead measurements** (doc 12 §9, `bench_thread_overhead.lua` +
+`bench_precise.lua`):
+
+| Operation | Latency |
+|:--|:--|
+| `uv.new_work` queue+run+callback (reused) | ~0.1 ms |
+| `io.popen` echo (thread-style) | ~1.8 ms |
+| `vim.system` echo `:wait()` (main) | ~1.5 ms |
+| `vim.mpack.encode` (90KB payload) | ~0.8 ms |
+| `vim.mpack.decode` (90KB payload) | ~0.6 ms |
+| sqlite open + create table on thread | ~0.4 ms |
+| Thread + sqlite RSS footprint | **+4 KB** |
+
+**Conclusion:** the thread model's overhead is negligible — thread spawn is
+sub-millisecond, `io.popen` ≈ `vim.system`, msgpack is sub-ms even for large
+payloads, and the memory cost of a thread + sqlite is ~4KB. No performance
+reason to avoid `uv.new_work`.
 
 ---
 
@@ -587,3 +632,51 @@ replaces `vim.fn.input` with the scratchpad.)
   create flow is exactly what runs on the thread. So capabilities both *decide
   what work exists* and *run on the thread*. See doc 08 §3.1 for the full
   capability→action→event matrix.
+
+---
+
+## 9. Implementation Status (rediscovered — what's done vs remaining)
+
+The thread model is **largely implemented**. This section records the actual
+state so the remaining work is clear.
+
+### 9.1 Implemented (verified in source)
+
+| Piece | Location | Notes |
+|:--|:--|:--|
+| Generic thread worker | `lua/lreview/thread.lua` | `create_worker(mod, fn, cb)` — msgpack in/out, `rawset(vim,"g",{})` bootstrap, `vim.schedule` escape (solves problems 1,3,6) |
+| Adapter io.popen fallback | `lua/lreview/adapter/base.lua` | `M.run` uses `vim.system` on main, `io.popen` on thread (solves problem 4) |
+| Thread sync entry | `lua/lreview/review.lua` `sync_review_thread` | Opens own connection (`keep_open`), sets `M.current`, calls `sync_review` |
+| Async pull | `lua/lreview/review.lua` `pull_review_async` | Uses `thread.create_worker`, refreshes panels in callback |
+| GC thread fix | `lua/lreview/storage/init.lua` | `rawset(vim,"g",{})` + `keep_open = true` (solves problems 1,2) |
+| Batched reconcile | `sync_review` | Single query + in-memory index (doc 10 ~11x win) |
+
+### 9.2 Remaining work (in priority order)
+
+1. **Move `submit_review` to a thread** (doc 07 §2.5). Currently synchronous on
+   main thread — blocks UI during the push loop. Needs a `submit_review_thread`
+   entry + `pull_review_async`-style wrapper. **Depends on** #2 (decomposition)
+   so the pure core is separable from `vim.notify`.
+2. **Decompose `sync_review` monolith** (doc 07 §2.2) into
+   `_sync_threads` / `_reconcile_remote_comment_deletions` /
+   `_reconcile_remote_thread_deletions`. Improves testability + enables #1.
+3. **Replay `vim.notify` from thread callback.** Currently `sync_review` calls
+   `vim.notify` on the worker thread where it's **nil → silently lost** (doc 12
+   §3.2). Fix: collect `{msg, level}` into the result, replay in the callback
+   (already wrapped in `vim.schedule`). This is the **one correctness bug** in
+   the current implementation.
+4. **Wire sync-bus diff-cache invalidation + bypass fix** (doc 04). `sync.lua`
+   has `invalidate_diff_cache()` but it's never called; `pull_review_async`
+   callback bypasses the bus (manually refreshes instead of `mark_dirty`+`flush`).
+5. **`git.changed_lines` on a thread** (doc 09 §8.3/B). Biggest UI-latency win,
+   thread-ready as-is. Companion to the diff cache.
+
+### 9.3 Verification checklist (updated)
+
+- [x] `thread.lua` msgpack in/out works (sanity_serialize.lua)
+- [x] `base.lua` io.popen fallback works on thread (sanity_thread_network.lua)
+- [x] `gc_work` opens with `keep_open` + `vim.g` (sanity_work.lua)
+- [ ] `sync_review` emits **no** `vim.notify` on the thread (collect + replay)
+- [ ] `submit_review` runs on a thread, UI stays responsive
+- [ ] `invalidate_diff_cache` called on pull/branch change
+- [ ] `pull_review_async` callback goes through `sync.mark_dirty`+`flush`

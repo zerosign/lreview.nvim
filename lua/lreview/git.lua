@@ -4,7 +4,19 @@
 
 local M = {}
 
+--- Shell-escape a single argument for io.popen (thread fallback).
+---@param s string
+---@return string
+local function shell_escape(s)
+  if vim.fn and vim.fn.shellescape then
+    return vim.fn.shellescape(s)
+  end
+  return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
+end
+
 --- Run a git command in the given directory (or cwd).
+--- On the main thread this uses vim.system (honors cwd reliably). On a worker
+--- thread vim.system is nil, so we fall back to io.popen (see doc 12 §3.8).
 ---@param args string[]
 ---@param cwd string|nil
 ---@return string|nil output, string|nil err
@@ -13,17 +25,47 @@ local function git(args, cwd)
   for _, a in ipairs(args) do
     cmd[#cmd + 1] = a
   end
-  -- Use vim.system with the cwd option: vim.fn.system(cmd, cwd) does not
-  -- reliably honor a cwd different from the process cwd in this Neovim build.
-  local opts = { text = true }
+  if vim.system then
+    -- Use vim.system with the cwd option: vim.fn.system(cmd, cwd) does not
+    -- reliably honor a cwd different from the process cwd in this Neovim build.
+    local opts = { text = true }
+    if cwd then
+      opts.cwd = cwd
+    end
+    local res = vim.system(cmd, opts):wait()
+    if res.code ~= 0 then
+      return nil, res.stdout .. res.stderr
+    end
+    return res.stdout, nil
+  end
+
+  -- Thread execution fallback: io.popen (vim.system is nil on worker threads).
+  local parts = {}
+  for _, a in ipairs(cmd) do
+    parts[#parts + 1] = shell_escape(a)
+  end
+  local cmd_str = table.concat(parts, " ")
   if cwd then
-    opts.cwd = cwd
+    cmd_str = "cd " .. shell_escape(cwd) .. " && " .. cmd_str
   end
-  local res = vim.system(cmd, opts):wait()
-  if res.code ~= 0 then
-    return nil, res.stdout .. res.stderr
+  local f = io.popen(cmd_str .. " 2>&1")
+  if not f then
+    return nil, "failed to execute git on worker thread"
   end
-  return res.stdout, nil
+  local out = f:read("*a") or ""
+  local ok_close, exit_type, code = f:close()
+  local exit_code = 0
+  if type(code) == "number" then
+    exit_code = code
+  elseif type(exit_type) == "number" then
+    exit_code = exit_type
+  elseif ok_close == false or ok_close == nil then
+    exit_code = 1
+  end
+  if exit_code ~= 0 then
+    return nil, out
+  end
+  return out, nil
 end
 
 --- Find the git root of a directory (or nil if not a repo).
@@ -289,6 +331,20 @@ function M.changed_lines(target_branch, rel_path, cwd)
     end
   end
   return lines
+end
+
+--- Thread entry point for changed_lines.
+--- Executed on a worker thread (isolated Lua state, vim.system/vim.fn nil).
+---@param db_path string
+---@param lazy_sqlite string
+---@param args table  -- { cwd, path, target_branch }
+---@return table  -- { ok, lines?, err?, cwd, path }
+function M.changed_lines_thread(db_path, lazy_sqlite, args)
+  local lines, err = M.changed_lines(args.target_branch, args.path, args.cwd)
+  if not lines then
+    return { ok = false, err = err, cwd = args.cwd, path = args.path }
+  end
+  return { ok = true, lines = lines, cwd = args.cwd, path = args.path }
 end
 
 return M

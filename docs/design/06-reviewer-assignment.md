@@ -2,8 +2,7 @@
 
 **Journey:** B 3 (Request review / assign reviewers)
 **Domain:** 3 — Requesting Review UX
-**Status:** ⏸️ **Deprioritized — enhancement/feature, not a core fix.** Design
-stays valid; implement only after the higher-priority plans (docs 01–05, 07–09).
+**Status:** ✅ **Implemented** — `assign_reviewers` on both adapters, `LocalReviewRequestReview` command, offline user cache. (Was ⏸️ deprioritized; now landed.)
 **Constraint:** must resolve **offline-first** (local user index) and run the
 network submit via **`uv.new_work`** (see [09-async-model.md](09-async-model.md)).
 

@@ -2,6 +2,7 @@
 
 **Applies to:** Docs 03, 05, 06, 07 (and the core adapter contract)
 **Domain:** Cross-Cutting — Multiplatform Safety
+**Status:** ✅ **Implemented** — `adapter/init.lua` + `adapter/base.lua` (`default_capabilities`, `M.supports()`, per-adapter overrides)
 
 ---
 
