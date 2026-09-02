@@ -51,13 +51,13 @@ if not content_str:match("Original PR description body.") then
 end
 print("SUCCESS: Buffer contents parsed and verified.")
 
--- 4. Mock the review.update_review call to capture user updates
+-- 4. Mock the review.update_review_async call to capture user updates
 local captured_title = nil
 local captured_body = nil
-review.update_review = function(title, body)
+review.update_review_async = function(title, body, number, cwd, callback)
   captured_title = title
   captured_body = body
-  return true, nil
+  if callback then callback(true, nil) end
 end
 
 -- 5. Simulate editing the buffer contents

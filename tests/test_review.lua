@@ -101,31 +101,50 @@ review.pull_review_async(function(success)
   pull_done = true
 end)
 
--- Test update_review
-local ok, err = review.update_review("New Title", "New Description")
-if not ok then
-  print("FAIL: update_review failed: " .. tostring(err))
+-- Test update_review via thread entry point (in-process, mock applies)
+local upd = review.update_review_thread(test_db_path, "", {
+  cwd = ".",
+  detail = detail,
+  number = 100,
+  title = "New Title",
+  body = "New Description",
+})
+if not upd.ok then
+  print("FAIL: update_review failed: " .. tostring(upd.err))
   os.exit(1)
 end
 
--- Test resolve_thread
-local ok, err = review.resolve_thread("thread_123", true)
-if not ok then
-  print("FAIL: resolve_thread failed: " .. tostring(err))
+-- Test resolve_thread via thread entry point
+local resl = review.resolve_thread_thread(test_db_path, "", {
+  cwd = ".",
+  detail = detail,
+  thread_id = "thread_123",
+  resolved_val = true,
+})
+if not resl.ok then
+  print("FAIL: resolve_thread failed: " .. tostring(resl.err))
   os.exit(1)
 end
 
--- Test approve_review
-local ok, err = review.approve_review()
-if not ok then
-  print("FAIL: approve_review failed: " .. tostring(err))
+-- Test approve_review via thread entry point
+local appr = review.approve_review_thread(test_db_path, "", {
+  cwd = ".",
+  detail = detail,
+  number = nil,
+})
+if not appr.ok then
+  print("FAIL: approve_review failed: " .. tostring(appr.err))
   os.exit(1)
 end
 
--- Test close_review
-local ok, err = review.close_review()
-if not ok then
-  print("FAIL: close_review failed: " .. tostring(err))
+-- Test close_review via thread entry point
+local clos = review.close_review_thread(test_db_path, "", {
+  cwd = ".",
+  detail = detail,
+  number = nil,
+})
+if not clos.ok then
+  print("FAIL: close_review failed: " .. tostring(clos.err))
   os.exit(1)
 end
 

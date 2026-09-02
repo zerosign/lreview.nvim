@@ -59,8 +59,11 @@ adapter.resolve = function()
   }
 end
 
-local url, err = review.create_review({ title = "Test MR", body = "Body" }, ".")
-if not url or url ~= "https://github.com/owner/repo/pull/1" then
+local created = review.create_review_thread("tmp/test_mr_lifecycle.db", "", {
+  cwd = ".",
+  opts = { title = "Test MR", body = "Body" },
+})
+if not (created and created.url == "https://github.com/owner/repo/pull/1") then
   print("FAIL: create_review failed to return mock URL")
   os.exit(1)
 end

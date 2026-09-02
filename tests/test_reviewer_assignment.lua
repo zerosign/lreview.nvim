@@ -35,10 +35,15 @@ adapter.resolve = function()
   }
 end
 
--- 3. Execute request_reviewers
-local ok, err = review.request_reviewers({ "octocat", "mona" })
-if not ok or err then
-  print("FAIL: request_reviewers failed: " .. tostring(err))
+-- 3. Execute request_reviewers via thread entry point
+local req = review.request_reviewers_thread("tmp/test_reviewer_assignment.db", "", {
+  cwd = review.current.cwd,
+  detail = review.current.detail,
+  number = review.current.detail.number,
+  reviewers = { "octocat", "mona" },
+})
+if not (req and req.ok) then
+  print("FAIL: request_reviewers failed: " .. tostring(req and req.err))
   os.exit(1)
 end
 

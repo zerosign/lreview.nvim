@@ -1066,203 +1066,6 @@ function M.list_templates(cwd)
   return resolved.adapter.list_templates(resolved.cfg, ctx)
 end
 
---- Create a new MR/PR on the platform.
----@param opts table  -- { title, body, source_branch, target_branch, template }
----@param cwd string|nil
----@return string|nil url, string|nil err
-function M.create_review(opts, cwd)
-  local resolved = adapter.resolve(cwd or vim.fn.getcwd())
-  if not resolved then
-    return nil, "no git remote detected"
-  end
-  local ctx = adapter.ctx(resolved)
-  local url, err = resolved.adapter.create_mr(resolved.cfg, ctx, opts)
-  if not url then
-    return nil, err
-  end
-  return url, nil
-end
-
---- Close an MR on the platform.
---- Uses the given remote identifier (MR/PR number) if provided, otherwise the
---- current active review's MR.
----@param number integer|nil  -- remote MR/PR number
----@return boolean, string|nil
-function M.close_review(number)
-  local detail = M.current and M.current.detail
-  local num = number or (detail and detail.number)
-  if not num then
-    return false, "no active review; run LocalReviewStart first (or pass an MR number)"
-  end
-  local cwd = M.current and M.current.cwd or vim.fn.getcwd()
-  local resolved = adapter.resolve(cwd)
-  if not resolved then
-    return false, "no git remote detected"
-  end
-  local ctx = adapter.ctx(resolved, num)
-  local ok, err = resolved.adapter.close_mr(resolved.cfg, ctx, num)
-  if not ok then
-    return false, err
-  end
-  local pull_request_storage = require("lreview.storage.pull_request")
-  if detail and detail.mo_id then
-    pull_request_storage.update_state(detail.mo_id, "closed")
-  end
-  return true, nil
-end
-
---- Approve an MR on the platform.
---- Uses the given remote identifier (MR/PR number) if provided, otherwise the
---- current active review's MR.
----@param number integer|nil  -- remote MR/PR number
----@return boolean, string|nil
-function M.approve_review(number)
-  local detail = M.current and M.current.detail
-  local num = number or (detail and detail.number)
-  if not num then
-    return false, "no active review; run LocalReviewStart first (or pass an MR number)"
-  end
-  local cwd = M.current and M.current.cwd or vim.fn.getcwd()
-  local resolved = adapter.resolve(cwd)
-  if not resolved then
-    return false, "no git remote detected"
-  end
-  local ctx = adapter.ctx(resolved, num)
-  local ok, err = resolved.adapter.approve_mr(resolved.cfg, ctx, num)
-  if not ok then
-    return false, err
-  end
-  local pull_request_storage = require("lreview.storage.pull_request")
-  if detail and detail.mo_id then
-    pull_request_storage.update_state(detail.mo_id, "approved")
-  end
-  return true, nil
-end
-
---- Create a new MR/PR on the platform.
----@param opts table -- { title, body, source_branch, target_branch, draft? }
----@param cwd string|nil
----@return string|nil url, string|nil err
-function M.create_review(opts, cwd)
-  cwd = cwd or vim.fn.getcwd()
-  local resolved = adapter.resolve(cwd)
-  if not resolved then
-    return nil, "no git remote detected"
-  end
-  local ctx = adapter.ctx(resolved)
-  local url, err = resolved.adapter.create_mr(resolved.cfg, ctx, opts)
-  if not url then
-    return nil, err
-  end
-  return url, nil
-end
-
---- Request reviewers for an MR/PR.
----@param reviewers string[]
----@param number integer|nil
----@param cwd string|nil
----@return boolean, string|nil
-function M.request_reviewers(reviewers, number, cwd)
-  local num = number or (M.current and M.current.detail and M.current.detail.number)
-  if not num then
-    return false, "no active review; run LocalReviewStart first (or pass an MR number)"
-  end
-  cwd = cwd or (M.current and M.current.cwd) or vim.fn.getcwd()
-  local resolved = adapter.resolve(cwd)
-  if not resolved then
-    return false, "no git remote detected"
-  end
-  if not adapter.supports(resolved, "assign_reviewers") then
-    return false, "reviewer assignment capability is not supported by active adapter"
-  end
-  local ctx = adapter.ctx(resolved, num)
-  local ok, err = resolved.adapter.assign_reviewers(resolved.cfg, ctx, num, reviewers)
-  if not ok then
-    return false, err
-  end
-  return true, nil
-end
-
---- Update an MR/PR's title and description.
----@param title string
----@param body string
----@param number integer|nil
----@param cwd string|nil
----@return boolean, string|nil
-function M.update_review(title, body, number, cwd)
-  local num = number or (M.current and M.current.detail.number)
-  if not num then
-    return false, "no active review"
-  end
-  cwd = cwd or (M.current and M.current.cwd) or vim.fn.getcwd()
-  local resolved = adapter.resolve(cwd)
-  if not resolved then
-    return false, "no git remote detected"
-  end
-  local ctx = adapter.ctx(resolved, num)
-  local ok, err = resolved.adapter.update_mr(resolved.cfg, ctx, num, title, body)
-  if not ok then
-    return false, err
-  end
-
-  -- Update local cached details if active
-  if M.current and M.current.detail.number == num then
-    M.current.detail.title = title
-    M.current.detail.body = body
-  end
-
-  local pull_request = require("lreview.storage.pull_request")
-  local ok_storage = storage.open()
-  if ok_storage then
-    local key = resolved.provider .. ":" .. resolved.repo .. ":" .. num
-    local cached = pull_request.get(key)
-    if cached then
-      cached.title = title
-      cached.body = body
-      pull_request.upsert(cached)
-    end
-  end
-
-  return true, nil
-end
-
---- Resolve or unresolve a comment thread.
---- Handles both local-only updates for drafts and remote platform calls for synced threads.
----@param thread_id string
----@param resolved_val boolean
----@return boolean, string|nil
-function M.resolve_thread(thread_id, resolved_val)
-  local t = comments.get_thread(thread_id)
-  if not t then
-    return false, "thread not found"
-  end
-
-  -- If it's a draft, just update local storage.
-  if comments.thread_is_draft(t.state) then
-    comments.resolve_thread(thread_id, resolved_val)
-    return true, nil
-  end
-
-  -- For synced threads, call the remote forge.
-  if not M.current then
-    return false, "no active review; run LocalReviewStart first"
-  end
-  local detail = M.current.detail
-  local resolved = adapter.resolve(M.current.cwd)
-  if not resolved then
-    return false, "no git remote detected"
-  end
-  local ctx = adapter.ctx(resolved, detail.number)
-  local ok, err = resolved.adapter.resolve_thread(resolved.cfg, ctx, detail.number, thread_id, resolved_val)
-  if not ok then
-    return false, err
-  end
-
-  -- Sync local state on success.
-  comments.resolve_thread(thread_id, resolved_val)
-  return true, nil
-end
-
 --- Thread-entry point for sync_review.
 --- Executed on worker thread with an isolated Lua state.
 --- Returns notifications collected during sync_review so they can be
@@ -1352,6 +1155,421 @@ function M.pull_review_async(callback)
     detail = M.current.detail,
   })
   return true, nil
+end
+
+--- Thread-entry point for close_review_async.
+--- Executed on a uv.new_work worker thread with an isolated Lua state.
+--- Runs the remote close CLI call (io.popen fallback for git/adapter) off the
+--- main thread. Storage state is NOT touched here; the main-thread callback
+--- updates SQLite after a successful close.
+---@param db_path string
+---@param lazy_sqlite string
+---@param args table  -- { cwd, detail, number }
+---@return table
+function M.close_review_thread(db_path, lazy_sqlite, args)
+  local sqlite = require("sqlite")
+  local db = sqlite.new(db_path, { keep_open = true })
+  db:eval("PRAGMA journal_mode=WAL;")
+  db:eval("PRAGMA busy_timeout=5000;")
+
+  local old_current = M.current
+  if args and args.cwd and args.detail then
+    M.current = { cwd = args.cwd, detail = args.detail }
+  end
+
+  local num = args and args.number or (M.current and M.current.detail and M.current.detail.number)
+  local resolved = adapter.resolve(M.current.cwd)
+  if not resolved then
+    M.current = old_current
+    db:close()
+    return { ok = false, err = "no git remote detected" }
+  end
+  local ctx = adapter.ctx(resolved, num)
+  local ok, err = resolved.adapter.close_mr(resolved.cfg, ctx, num)
+
+  M.current = old_current
+  db:close()
+  return { ok = ok, err = err, number = num }
+end
+
+local close_worker = nil
+
+--- Close an MR on the platform without blocking the UI.
+--- Resolves the remote close call on a uv.new_work worker and updates local
+--- storage on the main thread via the callback.
+---@param number integer|nil -- remote MR/PR number
+---@param callback fun(ok: boolean, err: string|nil)|nil
+---@return boolean, string|nil  -- false, "" when queued (async)
+function M.close_review_async(number, callback)
+  if not M.current then
+    if callback then callback(false, "no active review") end
+    return false, "no active review"
+  end
+  local detail = M.current.detail
+  local num = number or detail.number
+  if not num then
+    if callback then callback(false, "no active review; run LocalReviewStart first (or pass an MR number)") end
+    return false, "no active review; run LocalReviewStart first (or pass an MR number)"
+  end
+  local cwd = M.current.cwd or vim.fn.getcwd()
+
+  if not close_worker then
+    close_worker = thread.create_worker("lreview.review", "close_review_thread", function(res)
+      if res and res.ok then
+        local pull_request_storage = require("lreview.storage.pull_request")
+        local pr_detail = M.current and M.current.detail
+        if pr_detail and pr_detail.mo_id then
+          pull_request_storage.update_state(pr_detail.mo_id, "closed")
+        end
+      end
+      if callback and type(callback) == "function" then
+        callback(res and res.ok, res and res.err or nil)
+      end
+    end)
+  end
+
+  close_worker:queue({ cwd = cwd, detail = detail, number = num })
+  return false, nil
+end
+
+--- Thread-entry point for approve_review_async.
+--- Runs the remote approve CLI call on a worker thread. Storage updated by the
+--- main-thread callback.
+---@param db_path string
+---@param lazy_sqlite string
+---@param args table  -- { cwd, detail, number }
+---@return table
+function M.approve_review_thread(db_path, lazy_sqlite, args)
+  local sqlite = require("sqlite")
+  local db = sqlite.new(db_path, { keep_open = true })
+  db:eval("PRAGMA journal_mode=WAL;")
+  db:eval("PRAGMA busy_timeout=5000;")
+
+  local old_current = M.current
+  if args and args.cwd and args.detail then
+    M.current = { cwd = args.cwd, detail = args.detail }
+  end
+
+  local num = args and args.number or (M.current and M.current.detail and M.current.detail.number)
+  local resolved = adapter.resolve(M.current.cwd)
+  if not resolved then
+    M.current = old_current
+    db:close()
+    return { ok = false, err = "no git remote detected" }
+  end
+  local ctx = adapter.ctx(resolved, num)
+  local ok, err = resolved.adapter.approve_mr(resolved.cfg, ctx, num)
+
+  M.current = old_current
+  db:close()
+  return { ok = ok, err = err, number = num }
+end
+
+local approve_worker = nil
+
+--- Approve an MR on the platform without blocking the UI.
+--- Runs the remote approve call on a uv.new_work worker.
+---@param number integer|nil -- remote MR/PR number
+---@param callback fun(ok: boolean, err: string|nil)|nil
+---@return boolean, string|nil  -- false, nil when queued (async)
+function M.approve_review_async(number, callback)
+  if not M.current then
+    if callback then callback(false, "no active review") end
+    return false, "no active review"
+  end
+  local detail = M.current.detail
+  local num = number or detail.number
+  if not num then
+    if callback then callback(false, "no active review; run LocalReviewStart first (or pass an MR number)") end
+    return false, "no active review; run LocalReviewStart first (or pass an MR number)"
+  end
+  local cwd = M.current.cwd or vim.fn.getcwd()
+
+  if not approve_worker then
+    approve_worker = thread.create_worker("lreview.review", "approve_review_thread", function(res)
+      if res and res.ok then
+        local pull_request_storage = require("lreview.storage.pull_request")
+        local pr_detail = M.current and M.current.detail
+        if pr_detail and pr_detail.mo_id then
+          pull_request_storage.update_state(pr_detail.mo_id, "approved")
+        end
+      end
+      if callback and type(callback) == "function" then
+        callback(res and res.ok, res and res.err or nil)
+      end
+    end)
+  end
+
+  approve_worker:queue({ cwd = cwd, detail = detail, number = num })
+  return false, nil
+end
+
+--- Thread-entry point for resolve_thread_async.
+--- Runs the remote resolve CLI call for a synced thread on a worker thread.
+--- Local storage is updated by the main-thread callback once the remote call
+--- succeeds (SQLite is owned by the main thread).
+---@param db_path string
+---@param lazy_sqlite string
+---@param args table  -- { cwd, detail, thread_id, resolved_val }
+---@return table
+function M.resolve_thread_thread(db_path, lazy_sqlite, args)
+  local sqlite = require("sqlite")
+  local db = sqlite.new(db_path, { keep_open = true })
+  db:eval("PRAGMA journal_mode=WAL;")
+  db:eval("PRAGMA busy_timeout=5000;")
+
+  local old_current = M.current
+  if args and args.cwd and args.detail then
+    M.current = { cwd = args.cwd, detail = args.detail }
+  end
+
+  local resolved = adapter.resolve(M.current.cwd)
+  if not resolved then
+    M.current = old_current
+    db:close()
+    return { ok = false, err = "no git remote detected" }
+  end
+  local ctx = adapter.ctx(resolved, M.current.detail.number)
+  local ok, err = resolved.adapter.resolve_thread(
+    resolved.cfg, ctx, M.current.detail.number, args.thread_id, args.resolved_val)
+
+  M.current = old_current
+  db:close()
+  return { ok = ok, err = err }
+end
+
+local resolve_worker = nil
+
+--- Resolve a synced thread on the platform without blocking the UI.
+--- Draft threads are resolved locally/synchronously; synced threads hit the
+--- remote on a uv.new_work worker and update local state via the callback.
+---@param thread_id string
+---@param resolved_val boolean
+---@param callback fun(ok: boolean, err: string|nil)|nil
+---@return boolean, string|nil
+function M.resolve_thread_async(thread_id, resolved_val, callback)
+  local t = comments.get_thread(thread_id)
+  if not t then
+    if callback then callback(false, "thread not found") end
+    return false, "thread not found"
+  end
+
+  -- Draft threads: resolve locally (no network).
+  if comments.thread_is_draft(t.state) then
+    comments.resolve_thread(thread_id, resolved_val)
+    if callback then callback(true, nil) end
+    return true, nil
+  end
+
+  if not M.current then
+    if callback then callback(false, "no active review; run LocalReviewStart first") end
+    return false, "no active review; run LocalReviewStart first"
+  end
+  local detail = M.current.detail
+  local cwd = M.current.cwd or vim.fn.getcwd()
+
+  if not resolve_worker then
+    resolve_worker = thread.create_worker("lreview.review", "resolve_thread_thread", function(res)
+      if res and res.ok then
+        comments.resolve_thread(thread_id, resolved_val)
+      end
+      if callback and type(callback) == "function" then
+        callback(res and res.ok, res and res.err or nil)
+      end
+    end)
+  end
+
+  resolve_worker:queue({ cwd = cwd, detail = detail, thread_id = thread_id, resolved_val = resolved_val })
+  return false, nil
+end
+
+--- Thread-entry point for create_review_async.
+--- Runs the MR/PR create CLI call on a uv.new_work worker.
+---@param db_path string
+---@param lazy_sqlite string
+---@param args table  -- { cwd, opts }
+---@return table
+function M.create_review_thread(db_path, lazy_sqlite, args)
+  local sqlite = require("sqlite")
+  local db = sqlite.new(db_path, { keep_open = true })
+  db:eval("PRAGMA journal_mode=WAL;")
+  db:eval("PRAGMA busy_timeout=5000;")
+
+  if args and args.cwd then
+    M.current = { cwd = args.cwd, detail = M.current and M.current.detail }
+  end
+  local resolved = adapter.resolve(args.cwd)
+  if not resolved then
+    db:close()
+    return { ok = false, err = "no git remote detected" }
+  end
+  local ctx = adapter.ctx(resolved)
+  local url, err = resolved.adapter.create_mr(resolved.cfg, ctx, args.opts)
+
+  db:close()
+  return { ok = (url ~= nil), url = url, err = err }
+end
+
+local create_worker = nil
+
+--- Create a new MR/PR on the platform without blocking the UI.
+---@param opts table  -- { title, body, source_branch, target_branch, template }
+---@param cwd string|nil
+---@param callback fun(url: string|nil, err: string|nil)|nil
+---@return boolean, string|nil  -- false, nil when queued (async)
+function M.create_review_async(opts, cwd, callback)
+  cwd = cwd or (M.current and M.current.cwd) or vim.fn.getcwd()
+  if not create_worker then
+    create_worker = thread.create_worker("lreview.review", "create_review_thread", function(res)
+      if callback and type(callback) == "function" then
+        callback(res and res.url, res and res.err or nil)
+      end
+    end)
+  end
+  create_worker:queue({ cwd = cwd, opts = opts })
+  return false, nil
+end
+
+--- Thread-entry point for request_reviewers_async.
+--- Runs the reviewer-assignment CLI call on a uv.new_work worker.
+---@param db_path string
+---@param lazy_sqlite string
+---@param args table  -- { cwd, number, reviewers }
+---@return table
+function M.request_reviewers_thread(db_path, lazy_sqlite, args)
+  local sqlite = require("sqlite")
+  local db = sqlite.new(db_path, { keep_open = true })
+  db:eval("PRAGMA journal_mode=WAL;")
+  db:eval("PRAGMA busy_timeout=5000;")
+
+  local old_current = M.current
+  if args and args.cwd and args.detail then
+    M.current = { cwd = args.cwd, detail = args.detail }
+  end
+  local num = args and args.number or (M.current and M.current.detail and M.current.detail.number)
+  local resolved = adapter.resolve(args.cwd)
+  if not resolved then
+    M.current = old_current
+    db:close()
+    return { ok = false, err = "no git remote detected" }
+  end
+  if not adapter.supports(resolved, "assign_reviewers") then
+    M.current = old_current
+    db:close()
+    return { ok = false, err = "reviewer assignment capability is not supported by active adapter" }
+  end
+  local ctx = adapter.ctx(resolved, num)
+  local ok, err = resolved.adapter.assign_reviewers(resolved.cfg, ctx, num, args.reviewers)
+
+  M.current = old_current
+  db:close()
+  return { ok = ok, err = err }
+end
+
+local request_reviewers_worker = nil
+
+--- Request reviewers for an MR/PR without blocking the UI.
+---@param reviewers string[]
+---@param number integer|nil
+---@param cwd string|nil
+---@param callback fun(ok: boolean, err: string|nil)|nil
+---@return boolean, string|nil  -- false, nil when queued (async)
+function M.request_reviewers_async(reviewers, number, cwd, callback)
+  local num = number or (M.current and M.current.detail and M.current.detail.number)
+  if not num then
+    if callback then callback(false, "no active review; run LocalReviewStart first (or pass an MR number)") end
+    return false, "no active review; run LocalReviewStart first (or pass an MR number)"
+  end
+  cwd = cwd or (M.current and M.current.cwd) or vim.fn.getcwd()
+
+  if not request_reviewers_worker then
+    request_reviewers_worker = thread.create_worker("lreview.review", "request_reviewers_thread", function(res)
+      if callback and type(callback) == "function" then
+        callback(res and res.ok, res and res.err or nil)
+      end
+    end)
+  end
+  request_reviewers_worker:queue({
+    cwd = cwd,
+    detail = M.current and M.current.detail,
+    number = num,
+    reviewers = reviewers,
+  })
+  return false, nil
+end
+
+--- Thread-entry point for update_review_async.
+--- Runs the MR/PR update CLI call on a uv.new_work worker.
+---@param db_path string
+---@param lazy_sqlite string
+---@param args table  -- { cwd, number, title, body }
+---@return table
+function M.update_review_thread(db_path, lazy_sqlite, args)
+  local sqlite = require("sqlite")
+  local db = sqlite.new(db_path, { keep_open = true })
+  db:eval("PRAGMA journal_mode=WAL;")
+  db:eval("PRAGMA busy_timeout=5000;")
+
+  local old_current = M.current
+  if args and args.cwd and args.detail then
+    M.current = { cwd = args.cwd, detail = args.detail }
+  end
+  local num = args and args.number or (M.current and M.current.detail and M.current.detail.number)
+  local resolved = adapter.resolve(args.cwd)
+  if not resolved then
+    M.current = old_current
+    db:close()
+    return { ok = false, err = "no git remote detected" }
+  end
+  local ctx = adapter.ctx(resolved, num)
+  local ok, err = resolved.adapter.update_mr(resolved.cfg, ctx, num, args.title, args.body)
+
+  M.current = old_current
+  db:close()
+  return { ok = ok, err = err }
+end
+
+local update_worker = nil
+
+--- Update an MR/PR's title and description without blocking the UI.
+---@param title string
+---@param body string
+---@param number integer|nil
+---@param cwd string|nil
+---@param callback fun(ok: boolean, err: string|nil)|nil
+---@return boolean, string|nil  -- false, nil when queued (async)
+function M.update_review_async(title, body, number, cwd, callback)
+  local num = number or (M.current and M.current.detail and M.current.detail.number)
+  if not num then
+    if callback then callback(false, "no active review") end
+    return false, "no active review"
+  end
+  cwd = cwd or (M.current and M.current.cwd) or vim.fn.getcwd()
+
+  if not update_worker then
+    update_worker = thread.create_worker("lreview.review", "update_review_thread", function(res)
+      if res and res.ok and M.current and M.current.detail.number == num then
+        M.current.detail.title = title
+        M.current.detail.body = body
+        local pull_request = require("lreview.storage.pull_request")
+        local ok_storage = storage.open()
+        if ok_storage then
+          local key = (M.current and M.current.detail.provider) .. ":" .. (M.current and M.current.detail.repo) .. ":" .. num
+          local cached = pull_request.get(key)
+          if cached then
+            cached.title = title
+            cached.body = body
+            pull_request.upsert(cached)
+          end
+        end
+      end
+      if callback and type(callback) == "function" then
+        callback(res and res.ok, res and res.err or nil)
+      end
+    end)
+  end
+  update_worker:queue({ cwd = cwd, detail = M.current and M.current.detail, number = num, title = title, body = body })
+  return false, nil
 end
 
 return M

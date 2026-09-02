@@ -118,18 +118,20 @@ end
 local function execute_create_mr(cwd, choice, title, target)
   local body = choice and choice.content or ""
   local source_branch = git.current_branch(cwd)
-  local url, err = review.create_review({
+  review.create_review_async({
     title = title,
     body = body,
     source_branch = source_branch,
     target_branch = target,
     template = (choice and choice.name ~= "(blank)") and choice.name or nil,
-  }, cwd)
-  if not url then
-    vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-    return
-  end
-  vim.notify("lreview: created MR: " .. url, vim.log.levels.INFO)
+  }, cwd, function(url, err)
+    if not url then
+      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+      return
+    end
+    vim.notify("lreview: created MR: " .. url, vim.log.levels.INFO)
+    require("lreview.sync").schedule()
+  end)
 end
 
 -- Template -> target branch -> title -> create. Shared by both the
@@ -158,13 +160,14 @@ local function pick_template_and_create(cwd, choices, target_choices)
           target_branch = target,
           template = choice.path,
         }
-        local url, err = review.create_review(opts, cwd)
-        if not url then
-          vim.notify("lreview: failed to create MR: " .. tostring(err), vim.log.levels.ERROR)
-        else
-          vim.notify("lreview: created MR: " .. url, vim.log.levels.INFO)
-          require("lreview.sync").schedule()
-        end
+        review.create_review_async(opts, cwd, function(url, err)
+          if not url then
+            vim.notify("lreview: failed to create MR: " .. tostring(err), vim.log.levels.ERROR)
+          else
+            vim.notify("lreview: created MR: " .. url, vim.log.levels.INFO)
+            require("lreview.sync").schedule()
+          end
+        end)
       end)
     end)
   end)
@@ -226,56 +229,66 @@ local function cmd_create()
   pick_source_branch(cwd, choices, target_choices)
 end
 
-local function ensure_review_started()
-  if not review.current then
-    local detail, err = review.init_session()
+local function ensure_review_started(callback)
+  if review.current then
+    callback(true)
+    return
+  end
+  review.init_session_async(vim.fn.getcwd(), function(detail, err)
     if not detail then
       vim.notify("lreview: failed to start review session: " .. tostring(err), vim.log.levels.ERROR)
-      return false
+      callback(false)
+      return
     end
-  end
-  return true
+    callback(true)
+  end)
 end
 
 local function cmd_comment()
-  if not ensure_review_started() then return end
-  local start_line = vim.fn.line("'<")
-  local end_line = vim.fn.line("'>")
-  if start_line == 0 or end_line == 0 then
-    vim.notify("lreview: LocalReviewComment requires a visual selection", vim.log.levels.WARN)
-    return
-  end
-  local abs = vim.fn.expand("%:p")
-  local root = git.root(vim.fn.getcwd())
-  local path = abs
-  if root then
-    if vim.startswith(abs, root .. "/") then
-      path = abs:sub(#root + 2)
+  ensure_review_started(function(ok)
+    if not ok then return end
+    local start_line = vim.fn.line("'<")
+    local end_line = vim.fn.line("'>")
+    if start_line == 0 or end_line == 0 then
+      vim.notify("lreview: LocalReviewComment requires a visual selection", vim.log.levels.WARN)
+      return
     end
-  end
-  require("lreview.ui.editor").open_new_comment(path, start_line, end_line)
+    local abs = vim.fn.expand("%:p")
+    local root = git.root(vim.fn.getcwd())
+    local path = abs
+    if root then
+      if vim.startswith(abs, root .. "/") then
+        path = abs:sub(#root + 2)
+      end
+    end
+    require("lreview.ui.editor").open_new_comment(path, start_line, end_line)
+  end)
 end
 
 local function cmd_submit()
-  if not ensure_review_started() then return end
-  review.submit_review(nil, function(ok, count, err)
-    if err then
-      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-      return
-    end
-    vim.notify("lreview: submitted " .. count .. " inline comment(s)", vim.log.levels.INFO)
+  ensure_review_started(function(ok)
+    if not ok then return end
+    review.submit_review(nil, function(success, count, err)
+      if err then
+        vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+        return
+      end
+      vim.notify("lreview: submitted " .. count .. " inline comment(s)", vim.log.levels.INFO)
+    end)
   end)
 end
 
 local function cmd_pull()
-  if not ensure_review_started() then return end
-  vim.notify("lreview: pulling remote updates...", vim.log.levels.INFO)
-  review.pull_review_async(function(success)
-    if success then
-      vim.notify("lreview: remote updates pulled successfully", vim.log.levels.INFO)
-    else
-      vim.notify("lreview: failed to pull remote updates", vim.log.levels.ERROR)
-    end
+  ensure_review_started(function(ok)
+    if not ok then return end
+    vim.notify("lreview: pulling remote updates...", vim.log.levels.INFO)
+    review.pull_review_async(function(success)
+      if success then
+        vim.notify("lreview: remote updates pulled successfully", vim.log.levels.INFO)
+      else
+        vim.notify("lreview: failed to pull remote updates", vim.log.levels.ERROR)
+      end
+    end)
   end)
 end
 
@@ -302,44 +315,56 @@ local function cmd_pull_requests()
 end
 
 local function cmd_close(args)
-  if not ensure_review_started() then return end
-  local number = args.args ~= "" and tonumber(args.args) or nil
-  local ok, err = review.close_review(number)
-  if not ok then
-    vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-    return
-  end
-  vim.notify("lreview: closed MR #" .. (number or (review.current and review.current.detail.number)), vim.log.levels.INFO)
+  ensure_review_started(function(ok)
+    if not ok then return end
+    local number = args.args ~= "" and tonumber(args.args) or nil
+    vim.notify("lreview: closing MR...", vim.log.levels.INFO)
+    review.close_review_async(number, function(close_ok, err)
+      if not close_ok then
+        vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+        return
+      end
+      vim.notify("lreview: closed MR #" .. (number or (review.current and review.current.detail.number)), vim.log.levels.INFO)
+    end)
+  end)
 end
 
 local function cmd_approve(args)
-  if not ensure_review_started() then return end
-  local number = args.args ~= "" and tonumber(args.args) or nil
-  local ok, err = review.approve_review(number)
-  if not ok then
-    vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-    return
-  end
-  vim.notify("lreview: approved MR #" .. (number or (review.current and review.current.detail.number)), vim.log.levels.INFO)
+  ensure_review_started(function(ok)
+    if not ok then return end
+    local number = args.args ~= "" and tonumber(args.args) or nil
+    vim.notify("lreview: approving MR...", vim.log.levels.INFO)
+    review.approve_review_async(number, function(approve_ok, err)
+      if not approve_ok then
+        vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+        return
+      end
+      vim.notify("lreview: approved MR #" .. (number or (review.current and review.current.detail.number)), vim.log.levels.INFO)
+    end)
+  end)
 end
 
 local function cmd_toggle()
-  if not ensure_review_started() then return end
-  require("lreview.ui.decor").toggle()
+  ensure_review_started(function(ok)
+    if not ok then return end
+    require("lreview.ui.decor").toggle()
+  end)
 end
 
 local function cmd_open()
-  if not ensure_review_started() then return end
-  local line = vim.api.nvim_win_get_cursor(0)[1]
-  local abs = vim.fn.expand("%:p")
-  local root = git.root(vim.fn.getcwd())
-  local path = abs
-  if root then
-    if vim.startswith(abs, root .. "/") then
-      path = abs:sub(#root + 2)
+  ensure_review_started(function(ok)
+    if not ok then return end
+    local line = vim.api.nvim_win_get_cursor(0)[1]
+    local abs = vim.fn.expand("%:p")
+    local root = git.root(vim.fn.getcwd())
+    local path = abs
+    if root then
+      if vim.startswith(abs, root .. "/") then
+        path = abs:sub(#root + 2)
+      end
     end
-  end
-  require("lreview.ui.thread_view").show(vim.api.nvim_get_current_buf(), path, line)
+    require("lreview.ui.thread_view").show(vim.api.nvim_get_current_buf(), path, line)
+  end)
 end
 
 local function cmd_summary()
@@ -349,43 +374,50 @@ local function cmd_summary()
 end
 
 local function cmd_next()
-  if not ensure_review_started() then return end
-  require("lreview.ui.decor").next_thread()
+  ensure_review_started(function(ok)
+    if not ok then return end
+    require("lreview.ui.decor").next_thread()
+  end)
 end
 
 local function cmd_prev()
-  if not ensure_review_started() then return end
-  require("lreview.ui.decor").prev_thread()
+  ensure_review_started(function(ok)
+    if not ok then return end
+    require("lreview.ui.decor").prev_thread()
+  end)
 end
 
 local function cmd_request_review(args)
-  if not ensure_review_started() then return end
-  local cwd = vim.fn.getcwd()
-  local users = require("lreview.users").search_users(cwd, "")
-  if #users == 0 then
-    vim.notify("lreview: no repo users cached; fetching users...", vim.log.levels.INFO)
-    require("lreview.users").pull_users_async(function(success)
-      if success then
-        cmd_request_review(args)
-      end
-    end)
-    return
-  end
-  local choices = {}
-  for _, u in ipairs(users) do
-    choices[#choices + 1] = u.username
-  end
-  vim.ui.select(choices, {
-    prompt = "Select reviewer to request:",
-    format_item = function(u) return "@" .. u end,
-  }, function(selected)
-    if not selected then return end
-    local ok, err = review.request_reviewers({ selected })
-    if not ok then
-      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-    else
-      vim.notify("lreview: requested review from @" .. selected, vim.log.levels.INFO)
+  ensure_review_started(function(started)
+    if not started then return end
+    local cwd = vim.fn.getcwd()
+    local users = require("lreview.users").search_users(cwd, "")
+    if #users == 0 then
+      vim.notify("lreview: no repo users cached; fetching users...", vim.log.levels.INFO)
+      require("lreview.users").pull_users_async(function(success)
+        if success then
+          cmd_request_review(args)
+        end
+      end)
+      return
     end
+    local choices = {}
+    for _, u in ipairs(users) do
+      choices[#choices + 1] = u.username
+    end
+    vim.ui.select(choices, {
+      prompt = "Select reviewer to request:",
+      format_item = function(u) return "@" .. u end,
+    }, function(selected)
+      if not selected then return end
+      review.request_reviewers_async({ selected }, nil, nil, function(ok, err)
+        if not ok then
+          vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+        else
+          vim.notify("lreview: requested review from @" .. selected, vim.log.levels.INFO)
+        end
+      end)
+    end)
   end)
 end
 
@@ -405,12 +437,23 @@ end
 
 local function cmd_start()
   local cwd = vim.fn.getcwd()
-  local detail, err = review.init_session(cwd)
-  if not detail then
-    vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-    return
+  vim.notify("lreview: resolving MR for review...", vim.log.levels.INFO)
+  -- Non-blocking: uses a uv.new_work worker so the network MR resolution
+  -- (glab mr view, often 2-3s) never blocks the UI.
+  local fallback = review.init_session_async(cwd, function(detail, err)
+    if not detail then
+      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+      return
+    end
+    if detail.unlinked then
+      vim.notify("lreview: draft review session ready (no linked MR yet)", vim.log.levels.INFO)
+    else
+      vim.notify("lreview: review started for MR #" .. detail.number .. " (" .. detail.title .. ")", vim.log.levels.INFO)
+    end
+  end)
+  if fallback and fallback.unlinked then
+    vim.notify("lreview: draft review session ready (no linked MR yet)", vim.log.levels.INFO)
   end
-  vim.notify("lreview: review started for MR #" .. detail.number .. " (" .. detail.title .. ")", vim.log.levels.INFO)
 end
 
 -- ---------------------------------------------------------------------------
@@ -457,13 +500,17 @@ M.api = {
   detail_editor = require("lreview.ui.detail_editor"),
   summary = require("lreview.ui.summary"),
   init_session = review.init_session,
+  init_session_async = review.init_session_async,
   add_comment = review.add_comment,
   submit_review = review.submit_review,
   sync_review = review.sync_review,
   pull_review_async = review.pull_review_async,
-  close_review = review.close_review,
-  approve_review = review.approve_review,
-  resolve_thread = review.resolve_thread,
+  close_review_async = review.close_review_async,
+  approve_review_async = review.approve_review_async,
+  resolve_thread_async = review.resolve_thread_async,
+  request_reviewers_async = review.request_reviewers_async,
+  update_review_async = review.update_review_async,
+  create_review_async = review.create_review_async,
   resolve = adapter.resolve,
   users = require("lreview.users"),
   fetch_users = require("lreview.users").fetch_users,

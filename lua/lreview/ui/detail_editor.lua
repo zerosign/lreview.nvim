@@ -86,14 +86,14 @@ function M.open(detail)
       local title, desc = parse_buffer(bufnr)
       vim.notify("lreview: updating MR details on " .. detail.provider .. "...", vim.log.levels.INFO)
       
-      local ok, err = review.update_review(title, desc, detail.number, vim.fn.getcwd())
-      if not ok then
-        vim.notify("lreview: failed to update MR: " .. tostring(err), vim.log.levels.ERROR)
-        return
-      end
-
-      vim.bo[bufnr].modified = false
-      vim.notify("lreview: MR updated successfully", vim.log.levels.INFO)
+      review.update_review_async(title, desc, detail.number, vim.fn.getcwd(), function(ok, err)
+        if not ok then
+          vim.notify("lreview: failed to update MR: " .. tostring(err), vim.log.levels.ERROR)
+          return
+        end
+        vim.bo[bufnr].modified = false
+        vim.notify("lreview: MR updated successfully", vim.log.levels.INFO)
+      end)
     end,
   })
 
