@@ -47,14 +47,26 @@ function M.resolve(cwd)
   if not cfg then
     return nil
   end
-  local adapter_name = cfg.adapter or "github"
+  -- Infer the adapter from the remote domain when no per-domain block sets one.
+  -- Prevents a gitlab.com remote silently resolving to the github/`gh` adapter
+  -- (which fails with "no known GitHub host"). Explicit `adapter` in a config
+  -- block always wins.
+  local inferred_name, inferred_provider
+  if remote.domain == "gitlab.com" or remote.domain:find("gitlab%.", 1, true) or remote.domain == "gitlab" then
+    inferred_name = "gitlab"
+    inferred_provider = "glab"
+  elseif remote.domain == "github.com" then
+    inferred_name = "github"
+    inferred_provider = "gh"
+  end
+  local adapter_name = cfg.adapter or inferred_name or "github"
   local adapter = M.get(adapter_name)
   if not adapter then
     return nil
   end
   return {
     adapter = adapter,
-    provider = cfg.provider or adapter.provider,
+    provider = cfg.provider or inferred_provider or adapter.provider,
     host = cfg.host or remote.domain,
     repo = remote.repo,
     cfg = cfg,

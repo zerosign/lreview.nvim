@@ -802,6 +802,11 @@ function M.submit_review(thread_id, callback)
           end
         end
         sync.schedule()
+      elseif res and res.err then
+        -- Never fail silently: surface the push error to the user (item 3).
+        if vim.notify then
+          vim.notify("lreview: push failed: " .. res.err, vim.log.levels.ERROR)
+        end
       end
 
       if callback then
