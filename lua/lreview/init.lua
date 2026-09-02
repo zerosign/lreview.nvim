@@ -13,6 +13,20 @@ local M = {}
 ---@param opts table|nil
 function M.setup(opts)
   config.setup(opts)
+  local diag = (opts and opts.defaults and opts.defaults.diagnostics) or nil
+  local timing = require("lreview.timing")
+  timing.configure(diag or {})
+  if timing.enabled() then
+    -- Flush buffered timing records to the timing file on exit so tmux E2E
+    -- scenarios can report them. Only registered when timing is opt-in enabled.
+    local augroup = vim.api.nvim_create_augroup("LReviewTimingFlush", { clear = true })
+    vim.api.nvim_create_autocmd("VimLeavePre", {
+      group = augroup,
+      callback = function()
+        pcall(function() timing.flush() end)
+      end,
+    })
+  end
   M.register_commands()
 end
 

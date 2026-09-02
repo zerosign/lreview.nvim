@@ -14,13 +14,11 @@ local function shell_escape(s)
   return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
 end
 
---- Run a git command in the given directory (or cwd).
---- On the main thread this uses vim.system (honors cwd reliably). On a worker
---- thread vim.system is nil, so we fall back to io.popen (see doc 12 §3.8).
+--- Unsynchronized git runner (no timing). See git() for the wrapped form.
 ---@param args string[]
 ---@param cwd string|nil
 ---@return string|nil output, string|nil err
-local function git(args, cwd)
+local function git_raw(args, cwd)
   local cmd = { "git" }
   for _, a in ipairs(args) do
     cmd[#cmd + 1] = a
@@ -66,6 +64,24 @@ local function git(args, cwd)
     return nil, out
   end
   return out, nil
+end
+
+--- Run a git command in the given directory (or cwd).
+--- On the main thread this uses vim.system (honors cwd reliably). On a worker
+--- thread vim.system is nil, so we fall back to io.popen (see doc 12 §3.8).
+---@param args string[]
+---@param cwd string|nil
+---@return string|nil output, string|nil err
+local function git(args, cwd)
+  local timing = require("lreview.timing")
+  local label = "git " .. table.concat(args, " ")
+  if not timing.enabled() then
+    return git_raw(args, cwd)
+  end
+  local start = vim.uv.hrtime() / 1e6
+  local out, err = git_raw(args, cwd)
+  timing.record(timing.CAT_GIT, label, (vim.uv.hrtime() / 1e6) - start)
+  return out, err
 end
 
 --- Find the git root of a directory (or nil if not a repo).

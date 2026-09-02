@@ -41,6 +41,15 @@ M.defaults = {
   },
   open = { method = "checkout" }, -- fetch+checkout the MR branch
   submit_immediately = false,
+  diagnostics = {
+    -- When true, per-operation durations (git, CLI, sqlite, flow spans) are
+    -- collected and logged under the "[lreview-timing]" tag. Adds slight
+    -- overhead; keep off in production.
+    timing = false,
+    -- File to append timing records to when diagnostics.timing is enabled.
+    -- When nil, records are emitted via vim.notify / nvim's log only.
+    timing_file = nil,
+  },
 }
 
 -- Deep merge b into a (mutates a, returns a). Tables are merged recursively,

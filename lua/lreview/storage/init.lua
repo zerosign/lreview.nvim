@@ -56,10 +56,10 @@ end
 --- Open (or create) the database and run migrations.
 ---@param db_path string|nil
 ---@return boolean ok, string|nil err
-function M.open(db_path)
-  if M.db then
-    return true, nil
-  end
+--- Unsynchronized open (no timing). See M.open().
+---@param db_path string|nil
+---@return boolean, string|nil
+local function open_raw(db_path)
   local ok, sqlite = pcall(require, "sqlite")
   if not ok then
     return false, "sqlite.lua not available: " .. tostring(sqlite)
@@ -102,6 +102,20 @@ function M.open(db_path)
     M.gc(db_cfg.keep_days or 30, false)
   end
   return true, nil
+end
+
+function M.open(db_path)
+  if M.db then
+    return true, nil
+  end
+  local timing = require("lreview.timing")
+  if timing.enabled() then
+    local start = vim.uv.hrtime() / 1e6
+    local ok, err = open_raw(db_path)
+    timing.record(timing.CAT_SQLITE, "open (" .. tostring(db_path or config.get_defaults().db_path) .. ")", (vim.uv.hrtime() / 1e6) - start)
+    return ok, err
+  end
+  return open_raw(db_path)
 end
 
 --- Close the database.
@@ -227,7 +241,18 @@ end
 ---@param sql string
 ---@vararg any  -- positional bind params (nil values allowed)
 ---@return table[] rows
-function M.query(sql, ...)
+---@param sql string
+---@return string
+local function short_sql(sql)
+  -- Keep the first statement up to the first newline, capped for readability.
+  return sql:gsub("\n", " "):sub(1, 60)
+end
+
+--- Unsynchronized query (no timing). See M.query().
+---@param sql string
+---@vararg any
+---@return table[]
+local function query_raw(sql, ...)
   ensure_db()
   local stmt = stmt_mod:parse(M.db.conn, sql)
   local n = select("#", ...)
@@ -243,11 +268,26 @@ function M.query(sql, ...)
   return rows
 end
 
---- Execute a statement with params, returning last insert id.
+--- Execute a parameterized SQL query returning rows.
 ---@param sql string
 ---@vararg any  -- positional bind params (nil values allowed)
+---@return table[] rows
+function M.query(sql, ...)
+  local timing = require("lreview.timing")
+  if timing.enabled() then
+    local start = vim.uv.hrtime() / 1e6
+    local rows = query_raw(sql, ...)
+    timing.record(timing.CAT_SQLITE, "query " .. short_sql(sql), (vim.uv.hrtime() / 1e6) - start)
+    return rows
+  end
+  return query_raw(sql, ...)
+end
+
+--- Unsynchronized execute (no timing). See M.execute().
+---@param sql string
+---@vararg any
 ---@return integer|nil last_id
-function M.execute(sql, ...)
+local function execute_raw(sql, ...)
   ensure_db()
   local stmt = stmt_mod:parse(M.db.conn, sql)
   local n = select("#", ...)
@@ -271,6 +311,21 @@ function M.execute(sql, ...)
     end
   end
   return nil
+end
+
+--- Execute a statement with params, returning last insert id.
+---@param sql string
+---@vararg any  -- positional bind params (nil values allowed)
+---@return integer|nil last_id
+function M.execute(sql, ...)
+  local timing = require("lreview.timing")
+  if timing.enabled() then
+    local start = vim.uv.hrtime() / 1e6
+    local id = execute_raw(sql, ...)
+    timing.record(timing.CAT_SQLITE, "execute " .. short_sql(sql), (vim.uv.hrtime() / 1e6) - start)
+    return id
+  end
+  return execute_raw(sql, ...)
 end
 
 --- Run garbage collection to clean up merged/closed PR comments older than X days.

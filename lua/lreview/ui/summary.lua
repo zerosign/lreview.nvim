@@ -292,13 +292,15 @@ local function handle_action(action)
     require("lreview.ui.thread_view").show(vim.api.nvim_get_current_buf(), thread.path, thread.start_line)
   elseif action == "resolve" then
     local new_val = not comments.thread_is_resolved(thread.state)
-    local ok, err = review.resolve_thread(thread.t_id, new_val)
-    if not ok then
-      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-      return
-    end
-    sync.schedule()
-    vim.notify(new_val and "lreview: thread resolved" or "lreview: thread reopened", vim.log.levels.INFO)
+    review.resolve_thread_async(thread.t_id, new_val, function(ok, err)
+      if not ok then
+        vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+        return
+      end
+      local sync2 = require("lreview.sync")
+      sync2.schedule()
+      vim.notify(new_val and "lreview: thread resolved" or "lreview: thread reopened", vim.log.levels.INFO)
+    end)
   elseif action == "delete" then
     if comments.thread_is_draft(thread.state) then
       comments.delete_thread(thread.t_id)
@@ -341,13 +343,15 @@ local function handle_action(action)
       vim.notify("lreview: approve MR capability is not supported by active adapter", vim.log.levels.WARN)
       return
     end
-    local ok, err = review.approve_review()
-    if not ok then
-      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-    else
-      vim.notify("lreview: MR approved successfully", vim.log.levels.INFO)
-      sync.schedule()
-    end
+    review.approve_review_async(nil, function(ok, err)
+      if not ok then
+        vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+      else
+        vim.notify("lreview: MR approved successfully", vim.log.levels.INFO)
+        local sync2 = require("lreview.sync")
+        sync2.schedule()
+      end
+    end)
   elseif action == "reject" then
     local adapter = require("lreview.adapter")
     local resolved = adapter.resolve(review.current and review.current.cwd)

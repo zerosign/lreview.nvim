@@ -11,6 +11,7 @@
 -- It only pushes the pending inline comments.
 
 local config = require("lreview.config")
+local thread = require("lreview.thread")
 local git = require("lreview.git")
 local model = require("lreview.model")
 local adapter = require("lreview.adapter")
@@ -102,7 +103,7 @@ end
 --- background (async init_session). Fast: only git subprocesses + SQLite.
 ---@param cwd string
 ---@return lreview.MRDetail
-local function local_fallback_detail(cwd)
+local function local_fallback_detail_raw(cwd)
   local branch = git.current_branch(cwd) or "head"
   local resolved = adapter.resolve(cwd)
   local ctx = resolved and adapter.ctx(resolved, branch) or {}
@@ -120,6 +121,17 @@ local function local_fallback_detail(cwd)
     target_branch = def_branch,
     files = git.changed_files(cwd, def_branch) or {},
   }
+end
+
+local function local_fallback_detail(cwd)
+  local timing = require("lreview.timing")
+  if not timing.enabled() then
+    return local_fallback_detail_raw(cwd)
+  end
+  local start = vim.uv.hrtime() / 1e6
+  local detail = local_fallback_detail_raw(cwd)
+  timing.record(timing.CAT_FLOW, "local_fallback_detail", (vim.uv.hrtime() / 1e6) - start)
+  return detail
 end
 
 --- Start a review: resolve MR, open storage, cache the MR detail.
@@ -231,10 +243,14 @@ function M.init_session_async(cwd, callback)
   sync.invalidate_diff_cache(cwd)
 
   -- Resolve the real MR on a worker thread (network off the main thread).
+  local timing = require("lreview.timing")
+  local resolve_started = nil
   if not init_worker then
-    local thread = require("lreview.thread")
     init_worker = thread.create_worker("lreview.review", "resolve_mr_thread", function(res)
       local detail = res and res.ok and res.detail
+      if timing.enabled() and resolve_started then
+        timing.record(timing.CAT_FLOW, "resolve_mr_roundtrip", (vim.uv.hrtime() / 1e6) - resolve_started)
+      end
       if detail and M.current and M.current.cwd == cwd then
         -- Upgrade the session to the real (linked) MR detail.
         pull_request.upsert(detail)
@@ -261,6 +277,9 @@ function M.init_session_async(cwd, callback)
     end)
   end
 
+  if timing.enabled() then
+    resolve_started = vim.uv.hrtime() / 1e6
+  end
   init_worker:queue({ cwd = cwd })
   return fallback, nil
 end
@@ -760,7 +779,6 @@ function M.submit_review(thread_id, callback)
 
   -- Normal mode: queue thread for network push (item 3).
   if not submit_worker then
-    local thread = require("lreview.thread")
     submit_worker = thread.create_worker("lreview.review", "submit_review_thread", function(res)
       -- Replay notifications collected on the worker thread (item 1).
       if res and res.notifications then
@@ -1298,7 +1316,6 @@ function M.pull_review_async(callback)
   end
 
   if not thread_worker then
-    local thread = require("lreview.thread")
     thread_worker = thread.create_worker("lreview.review", "sync_review_thread", function(res)
       local success = res and res.ok
       if success then

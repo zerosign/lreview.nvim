@@ -212,17 +212,17 @@ local function handle_action(action)
     local t = comments.get_thread(t_id)
     if t then
       local new_val = not comments.thread_is_resolved(t.state)
-      local ok, err = review.resolve_thread(t_id, new_val)
-      if not ok then
-        vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-        return
-      end
-      M.redraw()
-      vim.notify(new_val and "lreview: thread resolved" or "lreview: thread reopened", vim.log.levels.INFO)
-      local bufnr = vim.fn.bufnr(M.state.path)
-      if bufnr ~= -1 then
-        require("lreview.ui.decor").refresh(bufnr)
-      end
+      review.resolve_thread_async(t_id, new_val, function(ok, err)
+        if not ok then
+          vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+          return
+        end
+        vim.notify(new_val and "lreview: thread resolved" or "lreview: thread reopened", vim.log.levels.INFO)
+        local bufnr = vim.fn.bufnr(M.state.path)
+        if bufnr ~= -1 then
+          require("lreview.ui.decor").refresh(bufnr)
+        end
+      end)
     end
   elseif action == "submit" then
     vim.notify("lreview: submitting review...", vim.log.levels.INFO)

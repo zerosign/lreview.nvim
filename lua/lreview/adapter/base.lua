@@ -159,7 +159,15 @@ function M.run(argv, opts, callback)
     return nil
   end
 
-  local res = executor(argv, opts.cwd)
+  local timing = require("lreview.timing")
+  local res
+  if timing.enabled() then
+    local start = vim.uv.hrtime() / 1e6
+    res = executor(argv, opts.cwd)
+    timing.record(timing.CAT_CLI, table.concat(argv, " "), (vim.uv.hrtime() / 1e6) - start)
+  else
+    res = executor(argv, opts.cwd)
+  end
   local stdout = res.stdout or ""
   local stderr = res.stderr or ""
   local combined = stdout .. "\n" .. stderr

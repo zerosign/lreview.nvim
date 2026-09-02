@@ -56,6 +56,22 @@ test-ui: setup-sandbox
 # Alias for test-ui
 test-tmux: test-ui
 
+# Measure LocalReviewSummary initial-open latency (tmux, wall-clock threshold)
+bench-ui-summary: setup-sandbox
+    ./scripts/test_tmux_summary_latency.fish
+
+# Record per-operation durations (git, CLI, sqlite, flow) from real usage:
+# provisions a fresh branch+MR+changes in zerodevs/sample-review, then drives
+# LocalReviewStart (get MR) + LocalReviewSummary (local summary), tmux
+bench-timing: setup-sandbox
+    ./scripts/test_tmux_timing_gitlab.fish
+
+# Comprehensive per-operation timing across ALL 26 commands / all categories:
+# list MRs, get detail, sync discussions, submit comments, fetch users/PRs,
+# close MR, add comment, schema migration. Providis a fresh branch+MR+changes.
+bench-timing-all: setup-sandbox
+    ./scripts/test_tmux_timing_comprehensive.fish
+
 # Interactive tmux session helpers
 tmux-start: setup-sandbox
     ./scripts/tmux-nvim.fish start
