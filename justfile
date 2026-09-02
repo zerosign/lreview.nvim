@@ -16,12 +16,12 @@ setup-sandbox:
 
 # Run the unit test suite (default)
 test: setup-sandbox
-    for t in (string match -v -r 'test_(?:pull|gc_pull|multi_repo)\.lua$' tests/test_*.lua); echo "=== $t ==="; ./scripts/sandbox-nvim.fish --headless -l $t; or exit 1; end
+    for t in (string match -v -r 'test_(?:pull|gc_pull|multi_repo|push_live)\.lua$' tests/test_*.lua); echo "=== $t ==="; ./scripts/sandbox-nvim.fish --headless -l $t; or exit 1; end
     echo "ALL UNIT TESTS PASSED"
 
 # Run the integration test suite (network-dependent, hits live APIs)
 test-integration: setup-sandbox
-    for t in (string match -r '.*test_(?:pull|gc_pull|multi_repo)\.lua$' tests/test_*.lua); echo "=== $t ==="; ./scripts/sandbox-nvim.fish --headless -l $t; or exit 1; end
+    for t in (string match -r '.*test_(?:pull|gc_pull|multi_repo|push_live)\.lua$' tests/test_*.lua); echo "=== $t ==="; ./scripts/sandbox-nvim.fish --headless -l $t; or exit 1; end
     echo "ALL INTEGRATION TESTS PASSED"
 
 # Run the full suite (unit + integration)

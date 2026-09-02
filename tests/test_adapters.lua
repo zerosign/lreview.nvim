@@ -158,6 +158,49 @@ end
 
 print("SUCCESS: GitLab adapter mocks verified.")
 
+-- ============================================================================
+-- 3. Test domain-based adapter inference (no config block present).
+--    A gitlab.com remote must resolve to the gitlab/glab adapter instead of
+--    silently falling back to github/`gh` (which fails with "no known GitHub
+--    host" against a gitlab.com remote).
+-- ============================================================================
+local adapter_registry = require("lreview.adapter")
+local config_mod = require("lreview.config")
+local git_mod = require("lreview.git")
+
+config_mod.setup({}) -- no per-domain blocks -> force inference path
+local real_primary_remote = git_mod.primary_remote
+git_mod.primary_remote = function(_cwd)
+  return { domain = "gitlab.com", repo = "zerodevs/sample-review" }
+end
+
+local inferred = adapter_registry.resolve(".")
+if not inferred then
+  print("FAIL: adapter.resolve returned nil for gitlab.com remote (no config).")
+  os.exit(1)
+end
+if inferred.provider ~= "glab" then
+  print("FAIL: gitlab.com remote inferred provider=" .. tostring(inferred.provider) .. " (expected glab).")
+  os.exit(1)
+end
+if inferred.adapter ~= require("lreview.adapter.gitlab") then
+  print("FAIL: gitlab.com remote did not resolve to the gitlab adapter.")
+  os.exit(1)
+end
+
+-- A github.com remote should infer github/gh.
+git_mod.primary_remote = function(_cwd)
+  return { domain = "github.com", repo = "owner/repo" }
+end
+local gh_inferred = adapter_registry.resolve(".")
+if not gh_inferred or gh_inferred.provider ~= "gh" then
+  print("FAIL: github.com remote inferred provider=" .. tostring(gh_inferred and gh_inferred.provider) .. " (expected gh).")
+  os.exit(1)
+end
+
+git_mod.primary_remote = real_primary_remote
+print("SUCCESS: Domain-based adapter inference verified.")
+
 -- Restore original runner
 base.run = original_run
 
