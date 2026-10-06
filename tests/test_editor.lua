@@ -19,6 +19,8 @@ print("TEST: Starting Comment Scratchpad and Autocomplete Tests...")
 -- ============================================================================
 local test_db_path = "tmp/test_editor_suite.db"
 vim.fn.delete(test_db_path)
+vim.fn.delete(test_db_path .. "-wal")
+vim.fn.delete(test_db_path .. "-shm")
 
 init.setup({
   defaults = {
@@ -250,5 +252,7 @@ print("SUCCESS: Comment Scratchpad and Autocomplete Tests verified.")
 adapter.resolve = original_resolve
 storage.close()
 vim.fn.delete(test_db_path)
+vim.fn.delete(test_db_path .. "-wal")
+vim.fn.delete(test_db_path .. "-shm")
 print("\nALL EDITOR TESTS PASSED.")
 os.exit(0)

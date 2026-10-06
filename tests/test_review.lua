@@ -15,6 +15,8 @@ print("TEST: Starting Review Orchestrator Unit Tests...")
 -- ============================================================================
 local test_db_path = "tmp/test_review_suite.db"
 vim.fn.delete(test_db_path)
+vim.fn.delete(test_db_path .. "-wal")
+vim.fn.delete(test_db_path .. "-shm")
 
 init.setup({
   defaults = {
@@ -196,6 +198,8 @@ vim.ui.select = original_select
 vim.ui.input = original_input
 storage.close()
 vim.fn.delete(test_db_path)
+vim.fn.delete(test_db_path .. "-wal")
+vim.fn.delete(test_db_path .. "-shm")
 
 print("\nALL REVIEW AND INIT COMMAND TESTS PASSED.")
 os.exit(0)

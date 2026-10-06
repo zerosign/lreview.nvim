@@ -7,21 +7,34 @@
 # Test tiers:
 #   unit        — fast, offline, mock-based (default)
 #   integration — real GitHub/GitLab API calls against the sample repos
-
+#
+# The integration tier is matched by EXACT FILE NAME, not a suffix regex. A
+# previous `test_(?:push_live)\.lua$` rule silently failed to match
+# `test_push_live_gitlab.lua`, so the live tier ran inside `just test` and
+# posted real comments to the sample MR. Do not make that mistake again: if you
+# add a network test, list it below.
 set shell := ["fish", "-c"]
 
-# Initialize the sandbox dependencies locally if not present
-setup-sandbox:
-    test -d sandbox/luarocks; or command -v luarocks >/dev/null; and begin; echo "Installing lsqlite3 via luarocks into sandbox..."; luarocks install --tree=sandbox/luarocks lsqlite3; end; or echo "Warning: 'luarocks' CLI not found. Running tests might fail if sqlite3 is not available globally."
+integration_tests := "test_pull.lua test_gc_pull.lua test_multi_repo.lua test_push_live_gitlab.lua"
 
-# Run the unit test suite (default)
+# Initialize the sandbox dependencies locally if not present.
+# NOTE: the old form (`test -d …; or command -v …; and begin; … end`) chained
+# with fish's precedence, so it re-ran `luarocks install` on every invocation
+# and tripped a stale lock. `if` makes the intent explicit.
+setup-sandbox:
+    if not test -d sandbox/luarocks; and command -v luarocks >/dev/null; echo "Installing lsqlite3 via luarocks into sandbox..."; luarocks install --tree=sandbox/luarocks lsqlite3; else if not test -d sandbox/luarocks; echo "Warning: no sandbox/luarocks and no luarocks CLI. Tests may fail if sqlite3 is not available globally."; end
+
+# Run the unit test suite (default). Skips anything in {{integration_tests}}.
 test: setup-sandbox
-    for t in (string match -v -r 'test_(?:pull|gc_pull|multi_repo|push_live)\.lua$' tests/test_*.lua); echo "=== $t ==="; ./scripts/sandbox-nvim.fish --headless -l $t; or exit 1; end
+    for t in tests/test_*.lua; set -l b (basename $t); contains -- $b {{integration_tests}}; and continue; echo "=== $t ==="; ./scripts/sandbox-nvim.fish --headless -l $t; or exit 1; end
     echo "ALL UNIT TESTS PASSED"
 
-# Run the integration test suite (network-dependent, hits live APIs)
+# Run the integration test suite (network-dependent, hits live APIs).
+# Enumerated from {{integration_tests}} so both tiers share one source of truth.
+# (Do NOT reintroduce `string match -r` here: with a capturing group, fish also
+# emits each captured substring, so the loop ran jobs named "gc_pull", "pull", …)
 test-integration: setup-sandbox
-    for t in (string match -r '.*test_(?:pull|gc_pull|multi_repo|push_live)\.lua$' tests/test_*.lua); echo "=== $t ==="; ./scripts/sandbox-nvim.fish --headless -l $t; or exit 1; end
+    for name in {{integration_tests}}; test -e tests/$name; and begin; echo "=== tests/$name ==="; ./scripts/sandbox-nvim.fish --headless -l tests/$name; or exit 1; end; end
     echo "ALL INTEGRATION TESTS PASSED"
 
 # Run the full suite (unit + integration)
@@ -41,7 +54,7 @@ test-cov name: setup-sandbox
 # Run the unit suite under luacov and write luacov.report.out
 coverage: setup-sandbox
     rm -f luacov.stats.out luacov.report.out
-    for t in (string match -v -r 'test_(?:pull|gc_pull|multi_repo)\.lua$' tests/test_*.lua); ./scripts/sandbox-nvim.fish --headless -c "lua require('luacov')" -l $t; or exit 1; end
+    for t in tests/test_*.lua; set -l b (basename $t); contains -- $b {{integration_tests}}; and continue; ./scripts/sandbox-nvim.fish --headless -c "lua require('luacov')" -l $t; or exit 1; end
     ./scripts/sandbox-nvim.fish --headless -c "lua require('luacov.reporter').report()" -c "qa"
     echo "Coverage report written to luacov.report.out"
 

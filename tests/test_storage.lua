@@ -12,6 +12,8 @@ print("TEST: Starting Storage Layer Unit Tests...")
 -- 1. Configure and open a temporary test database
 local test_db_path = "tmp/test_storage_suite.db"
 vim.fn.delete(test_db_path)
+vim.fn.delete(test_db_path .. "-wal")
+vim.fn.delete(test_db_path .. "-shm")
 
 require("lreview").setup({
   defaults = {
@@ -174,5 +176,7 @@ print("SUCCESS: Comment and Thread operations verified.")
 -- 4. Teardown
 storage.close()
 vim.fn.delete(test_db_path)
+vim.fn.delete(test_db_path .. "-wal")
+vim.fn.delete(test_db_path .. "-shm")
 print("\nALL STORAGE TESTS PASSED.")
 os.exit(0)

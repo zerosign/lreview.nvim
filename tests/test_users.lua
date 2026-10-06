@@ -16,6 +16,8 @@ print("TEST: Starting Repo Users Unit Tests...")
 -- ============================================================================
 local test_db_path = "tmp/test_users_suite.db"
 vim.fn.delete(test_db_path)
+vim.fn.delete(test_db_path .. "-wal")
+vim.fn.delete(test_db_path .. "-shm")
 
 init.setup({
   defaults = {
@@ -162,5 +164,7 @@ print("SUCCESS: storage clear verified.")
 adapter.resolve = original_resolve
 storage.close()
 vim.fn.delete(test_db_path)
+vim.fn.delete(test_db_path .. "-wal")
+vim.fn.delete(test_db_path .. "-shm")
 print("\nALL REPO USERS TESTS PASSED.")
 os.exit(0)
