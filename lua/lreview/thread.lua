@@ -26,6 +26,56 @@ function M.test_worker_notify(db_path, lazy_sqlite, args)
   }
 end
 
+--- ---------------------------------------------------------------------------
+--- Per-call completion callbacks for cached workers
+--- ---------------------------------------------------------------------------
+-- `uv.new_work` workers are module-level singletons: their completion closure
+-- is built once, so a closure that captures a per-call `callback` argument
+-- forever re-invokes the FIRST call's callback (wrong count / stale notify).
+-- The callback therefore lives here, outside the closure.
+--
+-- libuv's thread pool runs one job per worker at a time and fires exactly one
+-- completion per queued job, in queue order — so a FIFO of callbacks pairs
+-- correctly with results, including when a caller queues two jobs back to back.
+local callback_queue = {}
+local MAX_ARMED = 64
+
+--- Arm a callback for the next result of the worker keyed by `key`.
+---@param key string  -- worker identity, e.g. "review.submit"
+---@param cb fun(...)|nil
+function M.arm(key, cb)
+  if type(cb) ~= "function" then return end
+  local q = callback_queue[key]
+  if not q then
+    q = {}
+    callback_queue[key] = q
+  end
+  q[#q + 1] = cb
+  -- Bound the queue: if completions never fire (no uv.new_work, killed job),
+  -- never grow without limit.
+  while #q > MAX_ARMED do table.remove(q, 1) end
+end
+
+--- Pop the oldest armed callback for `key`, or nil when none is armed.
+---@param key string
+---@return fun(...)|nil
+function M.pop_cb(key)
+  local q = callback_queue[key]
+  if not q or #q == 0 then return nil end
+  return table.remove(q, 1)
+end
+
+--- Pop and invoke the oldest armed callback for `key`.
+---@param key string
+---@param ... any
+---@return boolean fired
+function M.dispatch_cb(key, ...)
+  local cb = M.pop_cb(key)
+  if not cb then return false end
+  cb(...)
+  return true
+end
+
 --- Create a thread worker wrapper that handles environment bootstrap,
 --- dynamic module resolution on the worker thread, MessagePack serialization,
 --- and scheduled callback dispatch.
