@@ -24,9 +24,14 @@ M.capabilities = {
   list_templates   = true,
   inline_comments  = true,
   resolve_threads  = true,
+  -- POST /pulls/{n}/reviews creates every comment AND sets the event in one
+  -- all-or-nothing call.
   batch_submit     = true,
+  atomic_inline_batch = true,
+  verdict_in_review_batch = true,
   assign_reviewers = true,
   offline_staging  = true,
+  issues           = true,
 }
 
 --- Resolve an op value (string template or fn) into an argv list.
@@ -348,7 +353,7 @@ end
 ---@return boolean, string|nil
 function M.submit_inline_review(cfg, ctx, number, comments, body, opts)
   opts = opts or {}
-  local event = opts.verdict or "COMMENT"
+  local event = opts.verdict and tostring(opts.verdict):upper() or "COMMENT"
   local argv = api_argv(cfg, ctx)
   argv[#argv + 1] = string.format("repos/{owner}/{repo}/pulls/%d/reviews", number)
   argv[#argv + 1] = "-X"
@@ -632,6 +637,142 @@ function M.update_mr(cfg, ctx, number, title, body)
     return false, res.error
   end
   return true, nil
+end
+
+-- ---------------------------------------------------------------------------
+-- Review verdict (standalone)
+-- ---------------------------------------------------------------------------
+
+--- Submit a review verdict that has no inline comments attached.
+--- Only called when the batch carried no new threads (GitHub otherwise sends
+--- the event inside submit_inline_review); COMMENT is a no-op because pushing
+--- comments already leaves the review state untouched.
+---@param cfg table
+---@param ctx table
+---@param number integer
+---@param verdict string  -- "COMMENT" | "APPROVE" | "REQUEST_CHANGES"
+---@param body string|nil
+---@return boolean, string|nil
+function M.submit_verdict(cfg, ctx, number, verdict, body)
+  verdict = verdict and tostring(verdict):upper() or "COMMENT"
+  if verdict == "COMMENT" then
+    return true, nil
+  end
+  local argv = api_argv(cfg, ctx)
+  argv[#argv + 1] = string.format("repos/{owner}/{repo}/pulls/%d/reviews", number)
+  argv[#argv + 1] = "-X"
+  argv[#argv + 1] = "POST"
+  argv[#argv + 1] = "-f"
+  argv[#argv + 1] = "event=" .. verdict
+  if body and body ~= "" then
+    argv[#argv + 1] = "-f"
+    argv[#argv + 1] = "body=" .. body
+  end
+  local res = base.run(argv, { cwd = ctx.cwd })
+  if not res.ok then
+    return false, res.error
+  end
+  return true, nil
+end
+
+-- ---------------------------------------------------------------------------
+-- Issues
+-- ---------------------------------------------------------------------------
+
+--- One page of issues. Pagination is explicit (no `--paginate`) so the caller
+--- can report progress and stop early.
+---
+--- `/repos/{o}/{r}/issues` has no free-text parameter, so `filter` routes
+--- through `/search/issues`: that endpoint needs the repo spelled out inside
+--- the query (gh substitutes `{owner}/{repo}` only in the path) and returns an
+--- `{ items = [...] }` envelope instead of a bare array.
+---@param cfg table
+---@param ctx table
+---@param opts table|nil  -- { state, page, per_page, labels, assignee, author, filter }
+---@return lreview.Issue[]|nil, string|nil
+function M.list_issues(cfg, ctx, opts)
+  opts = opts or {}
+  local per_page = tostring(opts.per_page or 50)
+  local page = tostring(opts.page or 1)
+  local argv = api_argv(cfg, ctx)
+
+  if opts.filter and opts.filter ~= "" then
+    local q = "repo:" .. (ctx.repo or "") .. " is:issue " .. opts.filter
+    if opts.state == "closed" then
+      q = q .. " is:closed"
+    elseif opts.state ~= "all" then
+      q = q .. " is:open"
+    end
+    argv[#argv + 1] = "search/issues?q=" .. base.uri_encode(q)
+      .. "&per_page=" .. per_page .. "&page=" .. page
+  else
+    local qs = { "state=" .. (opts.state or "open"), "per_page=" .. per_page, "page=" .. page }
+    if opts.labels and opts.labels ~= "" then
+      qs[#qs + 1] = "labels=" .. opts.labels
+    end
+    if opts.assignee and opts.assignee ~= "" then
+      qs[#qs + 1] = "assignee=" .. opts.assignee
+    end
+    if opts.author and opts.author ~= "" then
+      qs[#qs + 1] = "creator=" .. opts.author
+    end
+    argv[#argv + 1] = "repos/{owner}/{repo}/issues?" .. table.concat(qs, "&")
+  end
+
+  local res = base.run(argv, { cwd = ctx.cwd })
+  local data, err = base.parse_json(res)
+  if not data then
+    return nil, err
+  end
+  if opts.filter and opts.filter ~= "" then
+    data = data.items or {}
+  end
+  -- The issues endpoint also returns pull requests; the mapper drops them so a
+  -- PR is never double-listed alongside its own MR cache row.
+  return mappers.gh_issues_to_issues(data, ctx.repo), nil
+end
+
+--- Single issue detail (fresh from the hub).
+---@param cfg table
+---@param ctx table
+---@param number integer
+---@return lreview.Issue|nil, string|nil
+function M.get_issue(cfg, ctx, number)
+  local argv = api_argv(cfg, ctx)
+  argv[#argv + 1] = string.format("repos/{owner}/{repo}/issues/%d", number)
+  local res = base.run(argv, { cwd = ctx.cwd })
+  local data, err = base.parse_json(res)
+  if not data then
+    return nil, err
+  end
+  if data.pull_request then
+    return nil, string.format("#%d is a pull request, not an issue", number)
+  end
+  return mappers.gh_issue_to_issue(data, ctx.repo), nil
+end
+
+--- One page of issue comments.
+---@param cfg table
+---@param ctx table
+---@param number integer
+---@param opts table|nil  -- { page, per_page }
+---@return lreview.IssueNote[]|nil, string|nil
+function M.fetch_issue_notes(cfg, ctx, number, opts)
+  opts = opts or {}
+  local argv = api_argv(cfg, ctx)
+  argv[#argv + 1] = string.format("repos/{owner}/{repo}/issues/%d/comments", number)
+    .. "?per_page=" .. tostring(opts.per_page or 50)
+    .. "&page=" .. tostring(opts.page or 1)
+  local res = base.run(argv, { cwd = ctx.cwd })
+  local data, err = base.parse_json(res)
+  if not data then
+    return nil, err
+  end
+  local out = {}
+  for _, n in ipairs(data) do
+    out[#out + 1] = mappers.gh_issue_note_to_note(n, ctx.repo, number)
+  end
+  return out, nil
 end
 
 return M

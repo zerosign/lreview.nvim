@@ -233,4 +233,154 @@ function M.glab_discussions_to_threads(discussions, mo_id)
   return out
 end
 
+-- ---------------------------------------------------------------------------
+-- Issues
+-- ---------------------------------------------------------------------------
+
+--- Normalize either the GraphQL-style label objects or the REST label strings.
+---@param labels table[]|nil
+---@return string|nil
+local function join_labels(labels)
+  if not labels or #labels == 0 then return nil end
+  local names = {}
+  for _, l in ipairs(labels) do
+    names[#names + 1] = (type(l) == "table") and (l.name or l.title) or tostring(l)
+  end
+  return table.concat(names, ",")
+end
+
+--- Map a GitHub issue object to a lreview.Issue.
+---@param i table
+---@param repo string
+---@return lreview.Issue
+function M.gh_issue_to_issue(i, repo)
+  local assignees = nil
+  if i.assignees and #i.assignees > 0 then
+    assignees = {}
+    for _, a in ipairs(i.assignees) do
+      assignees[#assignees + 1] = a.login
+    end
+  end
+  return {
+    issue_id = model.issue_id("github", repo, i.number),
+    provider = "github",
+    repo = repo,
+    number = i.number,
+    title = i.title,
+    body = i.body,
+    -- GitHub also reports "OPEN"/"CLOSED" on the GraphQL node.
+    state = (i.state or ""):lower() == "closed" and "closed" or "open",
+    author = i.user and i.user.login,
+    labels = join_labels(i.labels),
+    url = i.html_url,
+    comment_count = i.comments,
+    closed_at = i.closed_at,
+    updated_at = i.updated_at,
+    assignees = assignees,
+    milestone = i.milestone and i.milestone.title,
+  }
+end
+
+--- Map a GitHub issues-array to lreview.Issue[], dropping pull requests.
+--- The REST `/issues` endpoint returns PRs too (every PR is an issue); they are
+--- already cached in `pull_requests`, so letting them through would double-list
+--- them in the picker.
+---@param arr table[]
+---@param repo string
+---@return lreview.Issue[]
+function M.gh_issues_to_issues(arr, repo)
+  local out = {}
+  for _, i in ipairs(arr or {}) do
+    if not i.pull_request then
+      out[#out + 1] = M.gh_issue_to_issue(i, repo)
+    end
+  end
+  return out
+end
+
+--- Map a GitHub issue comment to a lreview.IssueNote.
+---@param n table
+---@param repo string
+---@param number integer
+---@return lreview.IssueNote
+function M.gh_issue_note_to_note(n, repo, number)
+  return {
+    note_id = model.note_id("github", repo, number, n.id),
+    issue_id = model.issue_id("github", repo, number),
+    remote_id = tostring(n.id),
+    author = n.user and n.user.login,
+    created_at = n.created_at,
+    body = n.body or "",
+    -- GitHub exposes no system events on the issue-comments endpoint.
+    system = false,
+  }
+end
+
+--- Map a GitLab issue object to a lreview.Issue.
+---@param i table
+---@param repo string
+---@return lreview.Issue
+function M.glab_issue_to_issue(i, repo)
+  if i.web_url then
+    local parsed_repo = i.web_url:match("https?://[^/]+/(.-)/%-/issues/")
+        or i.web_url:match("https?://[^/]+/(.-)/issues/")
+    if parsed_repo then repo = parsed_repo end
+  end
+  local assignees = nil
+  if i.assignees and #i.assignees > 0 then
+    assignees = {}
+    for _, a in ipairs(i.assignees) do
+      assignees[#assignees + 1] = a.username
+    end
+  end
+  local state = (i.state or "opened"):lower()
+  if state == "opened" then state = "open" end
+  return {
+    issue_id = model.issue_id("gitlab", repo, i.iid),
+    provider = "gitlab",
+    repo = repo,
+    number = i.iid,
+    title = i.title,
+    body = i.description,
+    state = state,
+    author = i.author and i.author.username,
+    labels = join_labels(i.labels),
+    url = i.web_url,
+    comment_count = i.user_notes_count,
+    closed_at = i.closed_at,
+    updated_at = i.updated_at,
+    assignees = assignees,
+    milestone = i.milestone and i.milestone.title,
+  }
+end
+
+--- Map a GitLab issues array to lreview.Issue[].
+---@param arr table[]
+---@param repo string
+---@return lreview.Issue[]
+function M.glab_issues_to_issues(arr, repo)
+  local out = {}
+  for _, i in ipairs(arr or {}) do
+    out[#out + 1] = M.glab_issue_to_issue(i, repo)
+  end
+  return out
+end
+
+--- Map a GitLab issue note to a lreview.IssueNote.
+---@param n table
+---@param repo string
+---@param number integer
+---@return lreview.IssueNote
+function M.glab_issue_note_to_note(n, repo, number)
+  return {
+    note_id = model.note_id("gitlab", repo, number, n.id),
+    issue_id = model.issue_id("gitlab", repo, number),
+    remote_id = tostring(n.id),
+    author = n.author and n.author.username,
+    created_at = n.created_at,
+    body = n.body or "",
+    system = n.system == true,
+  }
+end
+
 return M

@@ -24,9 +24,18 @@ M.capabilities = {
   list_templates   = true,
   inline_comments  = true,
   resolve_threads  = true,
-  batch_submit     = true,
+  -- `glab mr note create` is one note per call: no batching, and therefore no
+  -- atomic all-or-nothing semantics either. The outbox (storage/outbox.lua)
+  -- commits each note as it succeeds, which is what keeps a mid-loop failure
+  -- from re-posting notes that already landed.
+  batch_submit     = false,
+  atomic_inline_batch = false,
+  -- `mr note create` has no review-event concept: the verdict must be its own
+  -- submit_verdict call.
+  verdict_in_review_batch = false,
   assign_reviewers = true,
   offline_staging  = true,
+  issues           = true,
 }
 
 --- Build the base argv with optional --repo.
@@ -456,6 +465,125 @@ function M.assign_reviewers(cfg, ctx, number, reviewers)
     return false, res.error
   end
   return true, nil
+end
+
+-- ---------------------------------------------------------------------------
+-- Review verdict (standalone)
+-- ---------------------------------------------------------------------------
+
+--- Submit a review verdict that has no inline comments attached.
+--- GitLab has no `mr note` equivalent of GitHub's review event: APPROVE maps to
+--- `glab mr approve`, COMMENT is a no-op, and REQUEST_CHANGES is honestly
+--- unsupported — the user must see that instead of a silent no-op.
+---@param cfg table
+---@param ctx table
+---@param number integer
+---@param verdict string  -- "COMMENT" | "APPROVE" | "REQUEST_CHANGES"
+---@param body string|nil
+---@return boolean, string|nil
+function M.submit_verdict(cfg, ctx, number, verdict, body)
+  verdict = verdict and tostring(verdict):upper() or "COMMENT"
+  if not verdict or verdict == "COMMENT" then
+    return true, nil
+  end
+  if verdict == "APPROVE" then
+    return M.approve_mr(cfg, ctx, number)
+  end
+  return false, "gitlab: 'request changes' has no glab API equivalent — "
+    .. "inline comments were pushed, set the verdict in the MR UI"
+end
+
+-- ---------------------------------------------------------------------------
+-- Issues
+-- ---------------------------------------------------------------------------
+
+local GLAB_STATE = { open = "opened", closed = "closed", all = "all" }
+
+--- One page of issues. Pagination is explicit so the caller can report progress.
+---@param cfg table
+---@param ctx table
+---@param opts table|nil  -- { state, page, per_page, labels, assignee, author, filter }
+---@return lreview.Issue[]|nil, string|nil
+function M.list_issues(cfg, ctx, opts)
+  opts = opts or {}
+  local project = ctx.repo:gsub("/", "%%2F")
+  local qs = {
+    "state=" .. (GLAB_STATE[opts.state or "open"] or "opened"),
+    "per_page=" .. tostring(opts.per_page or 50),
+    "page=" .. tostring(opts.page or 1),
+    -- Newest-updated first: an interrupted pull still cached the relevant rows.
+    "order_by=updated_at",
+    "sort=desc",
+  }
+  if opts.labels and opts.labels ~= "" then
+    qs[#qs + 1] = "labels=" .. opts.labels
+  end
+  if opts.assignee and opts.assignee ~= "" then
+    qs[#qs + 1] = "assignee_username=" .. opts.assignee
+  end
+  if opts.author and opts.author ~= "" then
+    qs[#qs + 1] = "author_username=" .. opts.author
+  end
+  if opts.filter and opts.filter ~= "" then
+    qs[#qs + 1] = "search=" .. base.uri_encode(opts.filter)
+  end
+
+  local argv = base_argv(cfg, ctx)
+  argv[#argv + 1] = "api"
+  argv[#argv + 1] = string.format("projects/%s/issues?%s", project, table.concat(qs, "&"))
+  local res = base.run(argv, { cwd = ctx.cwd })
+  local data, err = base.parse_json(res)
+  if not data then
+    return nil, err
+  end
+  return mappers.glab_issues_to_issues(data, ctx.repo), nil
+end
+
+--- Single issue detail (fresh from the hub).
+---@param cfg table
+---@param ctx table
+---@param number integer  -- issue IID
+---@return lreview.Issue|nil, string|nil
+function M.get_issue(cfg, ctx, number)
+  local project = ctx.repo:gsub("/", "%%2F")
+  local argv = base_argv(cfg, ctx)
+  argv[#argv + 1] = "api"
+  argv[#argv + 1] = string.format("projects/%s/issues/%d", project, number)
+  local res = base.run(argv, { cwd = ctx.cwd })
+  local data, err = base.parse_json(res)
+  if not data then
+    return nil, err
+  end
+  return mappers.glab_issue_to_issue(data, ctx.repo), nil
+end
+
+--- Issue notes. GitLab mixes discussion notes and system notes
+--- ("added label ...") into one list; `system` is preserved so the UI can hide
+--- the noise without a second round trip.
+---@param cfg table
+---@param ctx table
+---@param number integer
+---@param opts table|nil  -- { page, per_page, include_system }
+---@return lreview.IssueNote[]|nil, string|nil
+function M.fetch_issue_notes(cfg, ctx, number, opts)
+  opts = opts or {}
+  local project = ctx.repo:gsub("/", "%%2F")
+  local argv = base_argv(cfg, ctx)
+  argv[#argv + 1] = "api"
+  argv[#argv + 1] = string.format("projects/%s/issues/%d/notes?per_page=%d&page=%d&sort=asc",
+    project, number, opts.per_page or 100, opts.page or 1)
+  local res = base.run(argv, { cwd = ctx.cwd })
+  local data, err = base.parse_json(res)
+  if not data then
+    return nil, err
+  end
+  local out = {}
+  for _, n in ipairs(data) do
+    if opts.include_system ~= false or not n.system then
+      out[#out + 1] = mappers.glab_issue_note_to_note(n, ctx.repo, number)
+    end
+  end
+  return out, nil
 end
 
 return M
