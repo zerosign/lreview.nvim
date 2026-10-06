@@ -1,12 +1,14 @@
 -- CRUD for the pull_requests table (MR/PR cache + detail).
 --
 -- Flat index columns (queried/indexed):
---   title      -> FTS5 trigram search
---   state      -> GC filter (merged/closed)
---   updated_at -> GC date threshold
+--   title          -> FTS5 trigram search
+--   state          -> GC filter (merged/closed)
+--   updated_at     -> GC date threshold
+--   source_branch  -> by_source_branch() at session start (idx_pr_branch)
+--   number         -> list()/search() ordering (idx_pr_provider_repo)
 --
 -- MessagePack payload (display-only metadata):
---   author, source_branch, target_branch, description,
+--   author, target_branch, description,
 --   base_sha, head_sha, url, remote_updated_at
 
 local storage = require("lreview.storage")
@@ -32,7 +34,10 @@ function M.upsert(mr)
   local state = mr.state
   local updated_at = mr.updated_at
 
-  -- Everything else goes into the MessagePack payload.
+  -- Everything else goes into the MessagePack payload. `source_branch` is
+  -- duplicated as a flat column because resolving "which MR is this branch?"
+  -- is the hottest lookup in the plugin and must not decode one payload per
+  -- row (v3 did exactly that in by_source_branch()).
   local payload = {
     author = mr.author,
     source_branch = mr.source_branch,
@@ -46,10 +51,12 @@ function M.upsert(mr)
 
   storage.execute([[
     INSERT OR REPLACE INTO pull_requests
-      (mo_id, provider, repo, number, title, state, updated_at, payload)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      (mo_id, provider, repo, number, title, state, updated_at,
+       source_branch, target_branch, payload)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ]], mr.mo_id, mr.provider, mr.repo, mr.number,
-      title, state, updated_at, mpack.encode(payload))
+      title, state, updated_at, mr.source_branch, mr.target_branch,
+      mpack.encode(payload))
 end
 
 --- Update state column for an existing MR/PR record in SQLite.
@@ -83,26 +90,30 @@ function M.list(provider, repo)
 end
 
 --- Find an MR by source branch.
+---
+--- Indexed equality lookup (idx_pr_branch). The v3 implementation called
+--- list() and decoded every MessagePack payload to compare a branch in Lua.
 ---@param provider string
 ---@param repo string
 ---@param branch string
 ---@return table|nil
 function M.by_source_branch(provider, repo, branch)
-  local list = M.list(provider, repo)
-  for _, mr in ipairs(list) do
-    if mr.source_branch == branch then
-      return mr
-    end
-  end
-  return nil
+  if not branch or branch == "" then return nil end
+  local rows = storage.query([[
+    SELECT * FROM pull_requests
+    WHERE provider = ? AND repo = ? AND source_branch = ?
+    ORDER BY number DESC LIMIT 1
+  ]], provider, repo, branch)
+  return decode_mr(rows[1])
 end
 
---- Delete an MR and its dependent threads/comments/reviews.
+--- Delete an MR and its dependent threads/comments/reviews/outbox ops.
 ---@param mo_id string
 function M.delete(mo_id)
   storage.execute("DELETE FROM comments WHERE t_id IN (SELECT t_id FROM threads WHERE mo_id = ?)", mo_id)
   storage.execute("DELETE FROM threads WHERE mo_id = ?", mo_id)
   storage.execute("DELETE FROM reviews WHERE mo_id = ?", mo_id)
+  storage.execute("DELETE FROM push_ops WHERE mo_id = ?", mo_id)
   storage.execute("DELETE FROM pull_requests WHERE mo_id = ?", mo_id)
 end
 

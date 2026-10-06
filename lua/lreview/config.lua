@@ -39,7 +39,16 @@ M.defaults = {
     float = { width = 0.5, height = 0.6 },
     layout = "split",             -- "float" | "split" | "vsplit"
   },
-  open = { method = "checkout" }, -- fetch+checkout the MR branch
+  open = { method = "checkout" },
+  -- Issue tracker cache (issues are what an MR description usually points at).
+  --   per_page          -- hub page size for the sequential issue pull
+  --   max_pages         -- hard stop so a huge tracker cannot run away
+  --   stale_after_min   -- :LocalReviewIssues refreshes the cache past this age
+  issues = {
+    per_page = 50,
+    max_pages = 20,
+    stale_after_min = 30,
+  }, -- fetch+checkout the MR branch
   submit_immediately = false,
   diagnostics = {
     -- When true, per-operation durations (git, CLI, sqlite, flow spans) are

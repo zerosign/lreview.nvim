@@ -32,6 +32,12 @@ local gc_work = uv.new_work(function(db_path, lazy_sqlite, age_days)
   db:eval("DELETE FROM threads WHERE (state & 1) = 0 AND mo_id IN (SELECT mo_id FROM pull_requests WHERE state IN ('merged', 'closed') AND updated_at < ?) AND t_id NOT IN (SELECT DISTINCT t_id FROM comments WHERE remote_id IS NULL)", { date_threshold })
   db:eval("DELETE FROM reviews WHERE mo_id IN (SELECT mo_id FROM pull_requests WHERE state IN ('merged', 'closed') AND updated_at < ?)", { date_threshold })
   db:eval("DELETE FROM pull_requests WHERE state IN ('merged', 'closed') AND updated_at < ? AND mo_id NOT IN (SELECT DISTINCT mo_id FROM threads)", { date_threshold })
+  -- Outbox ledger rows are only meaningful while their MR is live.
+  db:eval("DELETE FROM push_ops WHERE mo_id NOT IN (SELECT mo_id FROM pull_requests)")
+  -- Closed issues age out on their own clock (the issues_ad trigger keeps
+  -- issues_fts in step when the bulk delete runs).
+  db:eval("DELETE FROM issue_notes WHERE issue_id IN (SELECT issue_id FROM issues WHERE state = 'closed' AND closed_at IS NOT NULL AND closed_at < ?)", { date_threshold })
+  db:eval("DELETE FROM issues WHERE state = 'closed' AND closed_at IS NOT NULL AND closed_at < ?", { date_threshold })
 
   db:close()
   return "success"
@@ -157,17 +163,19 @@ function M.migrate()
     -- Drop all tables/triggers if any exist to ensure a clean slate
     local tables = {
       "comments", "threads", "pull_requests", "reviews", "repo_users",
-      "repo_users_fts", "pull_requests_fts", "meta"
+      "repo_users_fts", "pull_requests_fts", "meta",
+      "push_ops", "issue_notes", "issues", "issues_fts",
     }
     for _, tbl in ipairs(tables) do
       pcall(function() M.db:execute("DROP TABLE IF EXISTS " .. tbl) end)
     end
-    pcall(function() M.db:execute("DROP TRIGGER IF EXISTS repo_users_ai") end)
-    pcall(function() M.db:execute("DROP TRIGGER IF EXISTS repo_users_ad") end)
-    pcall(function() M.db:execute("DROP TRIGGER IF EXISTS repo_users_au") end)
-    pcall(function() M.db:execute("DROP TRIGGER IF EXISTS pull_requests_ai") end)
-    pcall(function() M.db:execute("DROP TRIGGER IF EXISTS pull_requests_ad") end)
-    pcall(function() M.db:execute("DROP TRIGGER IF EXISTS pull_requests_au") end)
+    for _, trig in ipairs({
+      "repo_users_ai", "repo_users_ad", "repo_users_au",
+      "pull_requests_ai", "pull_requests_ad", "pull_requests_au",
+      "issues_ai", "issues_ad", "issues_au",
+    }) do
+      pcall(function() M.db:execute("DROP TRIGGER IF EXISTS " .. trig) end)
+    end
 
     -- Load base schema from schema.sql located in the same directory.
     local source = debug.getinfo(1).source:match("@(.*)$")
@@ -397,6 +405,42 @@ function M.gc(age_days, sync)
         SELECT DISTINCT mo_id FROM threads
       )
   ]], date_threshold)
+
+  -- 5. Drop outbox ledger rows whose MR is gone from the cache.
+  M.execute([[
+    DELETE FROM push_ops WHERE mo_id NOT IN (SELECT mo_id FROM pull_requests)
+  ]])
+
+  -- 6. Age out closed issues (and their notes) past the keep window.
+  M.execute([[
+    DELETE FROM issue_notes WHERE issue_id IN (
+      SELECT issue_id FROM issues
+      WHERE state = 'closed' AND closed_at IS NOT NULL AND closed_at < ?
+    )
+  ]], date_threshold)
+  M.execute([[
+    DELETE FROM issues
+    WHERE state = 'closed' AND closed_at IS NOT NULL AND closed_at < ?
+  ]], date_threshold)
+end
+
+-- ---------------------------------------------------------------------------
+-- meta KV (no index needed: `k` is the primary key)
+-- ---------------------------------------------------------------------------
+
+--- Read a meta value.
+---@param k string
+---@return string|nil
+function M.kv_get(k)
+  local rows = M.query("SELECT v FROM meta WHERE k = ?", k)
+  return rows[1] and rows[1].v or nil
+end
+
+--- Write a meta value.
+---@param k string
+---@param v string
+function M.kv_set(k, v)
+  M.execute("INSERT OR REPLACE INTO meta (k, v) VALUES (?, ?)", k, v)
 end
 
 return M

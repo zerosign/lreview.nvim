@@ -75,6 +75,32 @@ local M = {}
 ---@field comments lreview.Comment[]
 ---@field body string|nil
 
+---@class lreview.Issue  -- issue/bug tracker row (not a review thread)
+---@field issue_id string  -- "<provider>:<repo>:<number>"
+---@field provider string
+---@field repo string
+---@field number integer
+---@field title string
+---@field body string|nil
+---@field state string  -- "open" | "closed"
+---@field author string|nil
+---@field labels string|nil  -- comma-joined names
+---@field url string|nil
+---@field comment_count integer|nil
+---@field closed_at string|nil
+---@field updated_at string|nil
+---@field assignees string[]|nil
+---@field milestone string|nil
+
+---@class lreview.IssueNote  -- a comment on an issue
+---@field note_id string  -- "<provider>:<repo>:<number>:note:<remote id>"
+---@field issue_id string
+---@field remote_id string|nil
+---@field author string|nil
+---@field created_at string|nil
+---@field body string
+---@field system boolean  -- hub-generated noise ("changed label", ...)
+
 --- Build a canonical mo_id from provider/repo/number.
 ---@param provider string
 ---@param repo string
@@ -83,6 +109,27 @@ local M = {}
 function M.mo_id(provider, repo, number)
   -- Concatenation (not string.format) for LuaJIT-friendliness; called often.
   return provider .. ":" .. repo .. ":" .. tostring(number)
+end
+
+--- Canonical id for an issue. Same shape as mo_id on purpose: one database
+--- holds GitHub + GitLab rows and the provider prefix is what disambiguates.
+---@param provider string
+---@param repo string
+---@param number integer|string
+---@return string
+function M.issue_id(provider, repo, number)
+  return M.mo_id(provider, repo, number)
+end
+
+--- Canonical id for an issue note. Both hubs mint small integer note ids, so an
+--- unqualified note id collides across providers sharing one database.
+---@param provider string
+---@param repo string
+---@param number integer|string
+---@param note_id integer|string
+---@return string
+function M.note_id(provider, repo, number, note_id)
+  return M.mo_id(provider, repo, number) .. ":note:" .. tostring(note_id)
 end
 
 --- Parse a mo_id back into its parts.
