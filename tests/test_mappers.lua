@@ -204,5 +204,109 @@ end
 
 print("SUCCESS: GitLab mappers verified.")
 
+-- ============================================================================
+-- 3. Test Issue Mappers and vim.NIL handling
+-- ============================================================================
+
+-- Mock GitHub issue with vim.NIL fields (e.g. milestone, assignees, etc.)
+local mock_gh_issue_with_nil = {
+  number = 18,
+  title = "FreeBSD Build?",
+  body = "i tried using cargo crates to compile...",
+  state = "open",
+  html_url = "https://github.com/MaikBuse/gosuto/issues/18",
+  comments = 0,
+  closed_at = vim.NIL,
+  updated_at = "2026-09-28T17:20:46Z",
+  assignee = vim.NIL,
+  assignees = vim.NIL,
+  milestone = vim.NIL,
+  labels = vim.NIL,
+  user = {
+    login = "Konpaku-LVX",
+    id = 76745649
+  }
+}
+
+local gh_issue = mappers.gh_issue_to_issue(mock_gh_issue_with_nil, "MaikBuse/gosuto")
+if gh_issue.number ~= 18 or gh_issue.author ~= "Konpaku-LVX" or gh_issue.milestone ~= nil or gh_issue.assignees ~= nil or gh_issue.labels ~= nil then
+  print("FAIL: gh_issue_to_issue with vim.NIL failed.")
+  os.exit(1)
+end
+
+-- Mock GitHub issue with milestone object and assignees
+local mock_gh_issue_full = {
+  number = 19,
+  title = "Another issue",
+  body = vim.NIL,
+  state = "CLOSED",
+  html_url = "https://github.com/MaikBuse/gosuto/issues/19",
+  comments = 5,
+  closed_at = "2026-09-29T10:00:00Z",
+  updated_at = "2026-09-29T10:00:00Z",
+  assignees = { { login = "user1" }, { login = "user2" } },
+  milestone = { title = "v1.0" },
+  labels = { { name = "bug" }, { name = "help wanted" } },
+  user = { login = "creator" }
+}
+
+local gh_issue2 = mappers.gh_issue_to_issue(mock_gh_issue_full, "MaikBuse/gosuto")
+if gh_issue2.state ~= "closed" or gh_issue2.milestone ~= "v1.0" or #gh_issue2.assignees ~= 2 or gh_issue2.labels ~= "bug,help wanted" or gh_issue2.body ~= nil then
+  print("FAIL: gh_issue_to_issue with full fields failed.")
+  os.exit(1)
+end
+
+-- Mock GitHub issue note with vim.NIL
+local mock_gh_note = {
+  id = 12345,
+  user = { login = "commenter" },
+  created_at = "2026-09-29T12:00:00Z",
+  body = "Note body",
+}
+local gh_note = mappers.gh_issue_note_to_note(mock_gh_note, "MaikBuse/gosuto", 18)
+if gh_note.remote_id ~= "12345" or gh_note.author ~= "commenter" or gh_note.body ~= "Note body" then
+  print("FAIL: gh_issue_note_to_note failed.")
+  os.exit(1)
+end
+
+-- Mock GitLab issue with vim.NIL fields
+local mock_glab_issue_with_nil = {
+  iid = 4,
+  title = "Sample GitLab Issue",
+  description = vim.NIL,
+  state = "opened",
+  web_url = "https://gitlab.com/zerodevs/sample-review/-/issues/4",
+  user_notes_count = 2,
+  closed_at = vim.NIL,
+  updated_at = "2026-09-30T10:00:00Z",
+  assignees = vim.NIL,
+  milestone = vim.NIL,
+  labels = vim.NIL,
+  author = { username = "zerodevs" }
+}
+
+local glab_issue = mappers.glab_issue_to_issue(mock_glab_issue_with_nil, "zerodevs/sample-review")
+if glab_issue.number ~= 4 or glab_issue.author ~= "zerodevs" or glab_issue.milestone ~= nil or glab_issue.assignees ~= nil or glab_issue.description ~= nil then
+  print("FAIL: glab_issue_to_issue with vim.NIL failed.")
+  os.exit(1)
+end
+
+-- Mock GitLab issue note with vim.NIL
+local mock_glab_note = {
+  id = 987,
+  author = { username = "glabuser" },
+  created_at = "2026-09-30T11:00:00Z",
+  body = "GitLab note body",
+  system = false,
+}
+local glab_note = mappers.glab_issue_note_to_note(mock_glab_note, "zerodevs/sample-review", 4)
+if glab_note.remote_id ~= "987" or glab_note.author ~= "glabuser" or glab_note.body ~= "GitLab note body" or glab_note.system ~= false then
+  print("FAIL: glab_issue_note_to_note failed.")
+  os.exit(1)
+end
+
+print("SUCCESS: Issue mappers and vim.NIL handling verified.")
+
 print("\nALL MAPPER TESTS PASSED.")
 os.exit(0)
+

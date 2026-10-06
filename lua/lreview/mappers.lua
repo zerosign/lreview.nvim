@@ -9,6 +9,18 @@ local model = require("lreview.model")
 
 local M = {}
 
+local function non_nil(val)
+  if val == nil or val == vim.NIL then return nil end
+  return val
+end
+
+local function safe_field(obj, key)
+  if not obj or obj == vim.NIL or type(obj) ~= "table" then return nil end
+  local val = obj[key]
+  if val == nil or val == vim.NIL then return nil end
+  return val
+end
+
 -- ===========================================================================
 -- GitHub (gh) mappers
 -- ===========================================================================
@@ -241,11 +253,14 @@ end
 ---@param labels table[]|nil
 ---@return string|nil
 local function join_labels(labels)
-  if not labels or #labels == 0 then return nil end
+  if not labels or labels == vim.NIL or type(labels) ~= "table" or #labels == 0 then return nil end
   local names = {}
   for _, l in ipairs(labels) do
-    names[#names + 1] = (type(l) == "table") and (l.name or l.title) or tostring(l)
+    if l and l ~= vim.NIL then
+      names[#names + 1] = (type(l) == "table") and (safe_field(l, "name") or safe_field(l, "title")) or tostring(l)
+    end
   end
+  if #names == 0 then return nil end
   return table.concat(names, ",")
 end
 
@@ -255,29 +270,33 @@ end
 ---@return lreview.Issue
 function M.gh_issue_to_issue(i, repo)
   local assignees = nil
-  if i.assignees and #i.assignees > 0 then
+  if i.assignees and i.assignees ~= vim.NIL and type(i.assignees) == "table" and #i.assignees > 0 then
     assignees = {}
     for _, a in ipairs(i.assignees) do
-      assignees[#assignees + 1] = a.login
+      local login = safe_field(a, "login") or safe_field(a, "username")
+      if login then
+        assignees[#assignees + 1] = login
+      end
     end
+    if #assignees == 0 then assignees = nil end
   end
   return {
     issue_id = model.issue_id("github", repo, i.number),
     provider = "github",
     repo = repo,
     number = i.number,
-    title = i.title,
-    body = i.body,
+    title = non_nil(i.title) or "",
+    body = non_nil(i.body),
     -- GitHub also reports "OPEN"/"CLOSED" on the GraphQL node.
-    state = (i.state or ""):lower() == "closed" and "closed" or "open",
-    author = i.user and i.user.login,
+    state = (non_nil(i.state) or ""):lower() == "closed" and "closed" or "open",
+    author = safe_field(i.user, "login"),
     labels = join_labels(i.labels),
-    url = i.html_url,
-    comment_count = i.comments,
-    closed_at = i.closed_at,
-    updated_at = i.updated_at,
+    url = non_nil(i.html_url),
+    comment_count = non_nil(i.comments) or 0,
+    closed_at = non_nil(i.closed_at),
+    updated_at = non_nil(i.updated_at),
     assignees = assignees,
-    milestone = i.milestone and i.milestone.title,
+    milestone = safe_field(i.milestone, "title"),
   }
 end
 
@@ -308,9 +327,9 @@ function M.gh_issue_note_to_note(n, repo, number)
     note_id = model.note_id("github", repo, number, n.id),
     issue_id = model.issue_id("github", repo, number),
     remote_id = tostring(n.id),
-    author = n.user and n.user.login,
-    created_at = n.created_at,
-    body = n.body or "",
+    author = safe_field(n.user, "login"),
+    created_at = non_nil(n.created_at),
+    body = non_nil(n.body) or "",
     -- GitHub exposes no system events on the issue-comments endpoint.
     system = false,
   }
@@ -321,36 +340,40 @@ end
 ---@param repo string
 ---@return lreview.Issue
 function M.glab_issue_to_issue(i, repo)
-  if i.web_url then
+  if i.web_url and i.web_url ~= vim.NIL then
     local parsed_repo = i.web_url:match("https?://[^/]+/(.-)/%-/issues/")
         or i.web_url:match("https?://[^/]+/(.-)/issues/")
     if parsed_repo then repo = parsed_repo end
   end
   local assignees = nil
-  if i.assignees and #i.assignees > 0 then
+  if i.assignees and i.assignees ~= vim.NIL and type(i.assignees) == "table" and #i.assignees > 0 then
     assignees = {}
     for _, a in ipairs(i.assignees) do
-      assignees[#assignees + 1] = a.username
+      local name = safe_field(a, "username") or safe_field(a, "login")
+      if name then
+        assignees[#assignees + 1] = name
+      end
     end
+    if #assignees == 0 then assignees = nil end
   end
-  local state = (i.state or "opened"):lower()
+  local state = (non_nil(i.state) or "opened"):lower()
   if state == "opened" then state = "open" end
   return {
     issue_id = model.issue_id("gitlab", repo, i.iid),
     provider = "gitlab",
     repo = repo,
     number = i.iid,
-    title = i.title,
-    body = i.description,
+    title = non_nil(i.title) or "",
+    body = non_nil(i.description),
     state = state,
-    author = i.author and i.author.username,
+    author = safe_field(i.author, "username"),
     labels = join_labels(i.labels),
-    url = i.web_url,
-    comment_count = i.user_notes_count,
-    closed_at = i.closed_at,
-    updated_at = i.updated_at,
+    url = non_nil(i.web_url),
+    comment_count = non_nil(i.user_notes_count) or 0,
+    closed_at = non_nil(i.closed_at),
+    updated_at = non_nil(i.updated_at),
     assignees = assignees,
-    milestone = i.milestone and i.milestone.title,
+    milestone = safe_field(i.milestone, "title"),
   }
 end
 
@@ -376,9 +399,9 @@ function M.glab_issue_note_to_note(n, repo, number)
     note_id = model.note_id("gitlab", repo, number, n.id),
     issue_id = model.issue_id("gitlab", repo, number),
     remote_id = tostring(n.id),
-    author = n.author and n.author.username,
-    created_at = n.created_at,
-    body = n.body or "",
+    author = safe_field(n.author, "username"),
+    created_at = non_nil(n.created_at),
+    body = non_nil(n.body) or "",
     system = n.system == true,
   }
 end
