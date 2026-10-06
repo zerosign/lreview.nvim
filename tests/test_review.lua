@@ -6,6 +6,7 @@ package.path = package.path .. ";" .. project_root .. "/data/nvim/lazy/sqlite.lu
 local adapter = require("lreview.adapter")
 local storage = require("lreview.storage")
 local review = require("lreview.review")
+local git = require("lreview.git")
 local init = require("lreview")
 
 print("TEST: Starting Review Orchestrator Unit Tests...")
@@ -23,6 +24,7 @@ init.setup({
     db_path = test_db_path,
   }
 })
+vim.g.lreview_pull_job = 1
 
 -- Mock adapter resolver to completely isolate from git remotes and network
 local original_resolve = adapter.resolve
@@ -173,9 +175,30 @@ vim.cmd("LocalReviewToggle")
 vim.cmd("LocalReviewToggle") -- toggle back off
 
 -- Test pull command
+local pulled = false
+local orig_pull = review.pull_review_async
+review.pull_review_async = function(cb)
+  pulled = true
+  if cb then cb(true) end
+end
 vim.cmd("LocalReviewPull")
+assert(pulled, "LocalReviewPull should invoke review.pull_review_async")
+review.pull_review_async = orig_pull
 
 -- Test unlinked fallback when adapter returns nil MR
+local orig_changed = git.changed_files
+local orig_curr = git.current_branch
+local orig_def = git.default_branch
+git.changed_files = function()
+  return { { path = "foo.lua", additions = 1, deletions = 0 } }
+end
+git.current_branch = function()
+  return "feature"
+end
+git.default_branch = function()
+  return "master"
+end
+
 adapter.resolve = function(cwd)
   return {
     adapter = {
@@ -185,12 +208,19 @@ adapter.resolve = function(cwd)
       get_mr_detail = function() return nil, "no pull request" end,
     },
     cfg = { adapter = "github" },
+    provider = "gh",
+    host = "github.com",
+    repo = "owner/repo",
+    cwd = cwd,
   }
 end
 local unlinked_detail, uerr = review.init_session(vim.fn.getcwd())
 assert(unlinked_detail and unlinked_detail.unlinked == true, "unlinked detail fallback failed")
 assert(unlinked_detail.number == 0, "unlinked detail number should be 0")
 print("SUCCESS: Unlinked draft review fallback verified.")
+git.changed_files = orig_changed
+git.current_branch = orig_curr
+git.default_branch = orig_def
 
 -- Restoring environment
 adapter.resolve = original_resolve

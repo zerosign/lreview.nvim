@@ -72,10 +72,23 @@ function M.fetch_page_thread(db_path, lazy_sqlite, args)
   local ctx = adapter.ctx(resolved)
   local per_page = args.per_page or 50
 
+  local log_ok, log = pcall(require, "lreview.log")
+  if log_ok and log then
+    log.debug("issues", string.format("fetch_page_thread start kind=%s page=%d per_page=%d",
+      kind, args.page or 1, per_page), { repo = ctx and ctx.repo or "", cwd = args.cwd or "" })
+  end
+
   if kind == "issue" then
     local ok, issue, err = pcall(resolved.adapter.get_issue, resolved.cfg, ctx, args.number)
-    if not ok then return { ok = false, err = tostring(issue) } end
-    if not issue then return { ok = false, err = err } end
+    if not ok then
+      if log_ok and log then log.error("issues", "get_issue exception: " .. tostring(issue)) end
+      return { ok = false, err = tostring(issue) }
+    end
+    if not issue then
+      if log_ok and log then log.warn("issues", "get_issue not found: " .. tostring(err)) end
+      return { ok = false, err = err }
+    end
+    if log_ok and log then log.info("issues", string.format("get_issue #%d ok", args.number)) end
     return { ok = true, kind = kind, issue = issue }
   end
 
@@ -96,8 +109,17 @@ function M.fetch_page_thread(db_path, lazy_sqlite, args)
     author = args.author,
     assignee = args.assignee,
   })
-  if not ok then return { ok = false, err = tostring(list), kind = kind, page = args.page or 1 } end
-  if not list then return { ok = false, err = err, kind = kind, page = args.page or 1 } end
+  if not ok then
+    if log_ok and log then log.error("issues", "list_issues exception: " .. tostring(list)) end
+    return { ok = false, err = tostring(list), kind = kind, page = args.page or 1 }
+  end
+  if not list then
+    if log_ok and log then log.warn("issues", "list_issues error: " .. tostring(err)) end
+    return { ok = false, err = err, kind = kind, page = args.page or 1 }
+  end
+  if log_ok and log then
+    log.info("issues", string.format("list_issues page=%d ok, count=%d", args.page or 1, #list))
+  end
   return { ok = true, kind = kind, page = args.page or 1, issues = list }
 end
 
@@ -156,12 +178,20 @@ function M.pull_async(opts)
   local total, page = 0, 0
   in_flight = true
 
+  local log_ok, log = pcall(require, "lreview.log")
+  if log_ok and log then
+    log.info("issues", string.format("pull_async start repo=%s state=%s per_page=%d max_pages=%d",
+      resolved.repo, state, cfg.per_page, cfg.max_pages))
+  end
+
   local function finish(err)
     in_flight = false
     if err then
+      if log_ok and log then log.error("issues", "pull_async error: " .. tostring(err)) end
       vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
     else
       issue_store.mark_synced(M.canonical(resolved), resolved.repo, state)
+      if log_ok and log then log.info("issues", string.format("pull_async complete: cached %d issue(s) (%s)", total, state)) end
       vim.notify(string.format("lreview: cached %d issue(s) (%s)", total, state), vim.log.levels.INFO)
     end
     if opts.on_done then opts.on_done(err == nil, total, err) end
@@ -191,6 +221,10 @@ function M.pull_async(opts)
         return
       end
       total = total + written
+      if log_ok and log then
+        log.info("issues", string.format("pull_async page %d: received %d rows, wrote %d (total=%d)",
+          page, #rows, written, total))
+      end
       if opts.on_progress then opts.on_progress(page, total) end
       vim.notify(string.format("lreview: issues page %d (%d cached)", page, total), vim.log.levels.DEBUG)
       -- A short page is the end-of-list signal; anything else means more pages.

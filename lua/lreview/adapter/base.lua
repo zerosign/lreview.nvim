@@ -278,13 +278,27 @@ function M.run(argv, opts, callback)
   opts = opts or {}
   local exec = opts.executor or M.executor_override
 
+  local log_ok, log = pcall(require, "lreview.log")
+  local redacted_cmd = table.concat(M.redact_argv(argv), " ")
+  if log_ok and log then
+    log.debug("cli", "exec: " .. redacted_cmd, { cwd = opts.cwd })
+  end
+
   -- Async subprocess path (main thread only, no test override).
   if callback and not exec and vim.system then
     local o = { text = true }
     if opts.cwd then o.cwd = opts.cwd end
     vim.system(argv, o, function(res)
       vim.schedule(function()
-        callback(build_result(argv, res.stdout, res.stderr, res.code))
+        local result = build_result(argv, res.stdout, res.stderr, res.code)
+        if log_ok and log then
+          if result.ok then
+            log.debug("cli", string.format("ok: %s (code=%d, bytes=%d)", redacted_cmd, result.code, #result.stdout))
+          else
+            log.warn("cli", string.format("fail: %s (code=%d, err=%s)", redacted_cmd, result.code, result.error or result.stderr))
+          end
+        end
+        callback(result)
       end)
     end)
     return nil
@@ -295,13 +309,20 @@ function M.run(argv, opts, callback)
   if timing.enabled() then
     local start = vim.uv.hrtime() / 1e6
     raw = exec and exec(argv, opts.cwd) or spawn_wait(argv, opts.cwd)
-    timing.record(timing.CAT_CLI, table.concat(M.redact_argv(argv), " "), (vim.uv.hrtime() / 1e6) - start)
+    timing.record(timing.CAT_CLI, redacted_cmd, (vim.uv.hrtime() / 1e6) - start)
   else
     raw = exec and exec(argv, opts.cwd) or spawn_wait(argv, opts.cwd)
   end
   raw = raw or { stdout = "", stderr = "executor returned no result", code = 1 }
 
   local result = build_result(argv, raw.stdout, raw.stderr, raw.code)
+  if log_ok and log then
+    if result.ok then
+      log.debug("cli", string.format("ok: %s (code=%d, bytes=%d)", redacted_cmd, result.code, #result.stdout))
+    else
+      log.warn("cli", string.format("fail: %s (code=%d, err=%s)", redacted_cmd, result.code, result.error or result.stderr))
+    end
+  end
   if callback then callback(result) end
   return result
 end

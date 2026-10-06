@@ -15,7 +15,7 @@
 # add a network test, list it below.
 set shell := ["fish", "-c"]
 
-integration_tests := "test_pull.lua test_gc_pull.lua test_multi_repo.lua test_push_live_gitlab.lua"
+integration_tests := "test_pull.lua test_gc_pull.lua test_multi_repo.lua test_push_live_gitlab.lua test_issues_live.lua"
 
 # Initialize the sandbox dependencies locally if not present.
 # NOTE: the old form (`test -d …; or command -v …; and begin; … end`) chained

@@ -58,6 +58,11 @@ M.defaults = {
     -- File to append timing records to when diagnostics.timing is enabled.
     -- When nil, records are emitted via vim.notify / nvim's log only.
     timing_file = nil,
+    -- Diagnostic log file for recording CLI invocations, issue paging, and API
+    -- status with strict token/secret redaction.
+    log_file = nil,
+    -- Minimum log level: "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR".
+    log_level = "DEBUG",
   },
 }
 

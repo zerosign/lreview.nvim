@@ -64,6 +64,7 @@ local worker2 = thread.create_worker("lreview.thread", "test_worker", function(r
 end)
 thread.arm("t.pair", function(v) seen[#seen + 1] = { slot = 1, v = v } end)
 worker2:queue({ val = 10 })
+vim.wait(5000, function() return #seen >= 1 end, 10)
 thread.arm("t.pair", function(v) seen[#seen + 1] = { slot = 2, v = v } end)
 worker2:queue({ val = 20 })
 
