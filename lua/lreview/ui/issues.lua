@@ -30,10 +30,42 @@ local function format_item(i)
   return table.concat(parts, "  ")
 end
 
+--- Sync and reload the issue buffer asynchronously.
+local function sync_buffer(bufnr, notify_on_success)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
+  local num = tonumber(vim.b[bufnr].lreview_issue_number)
+  if not num then return end
+  issues.pull_one_async(num, function(ok, fresh, err)
+    if not ok then
+      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+      return
+    end
+    if vim.api.nvim_buf_is_valid(bufnr) then
+      M.render(bufnr, fresh)
+      if notify_on_success ~= false then
+        vim.notify("lreview: issue #" .. num .. " synced", vim.log.levels.INFO)
+      end
+    end
+  end)
+end
+
+local bufread_registered = false
+local function ensure_bufread_cmd()
+  if bufread_registered then return end
+  bufread_registered = true
+  vim.api.nvim_create_autocmd("BufReadCmd", {
+    pattern = "lreview_issue://*",
+    callback = function(ev)
+      sync_buffer(ev.buf, true)
+    end,
+  })
+end
+
 --- Open the cached detail (body + discussion) for one issue.
 ---@param i table
 function M.open(i)
   if not i or not i.issue_id then return end
+  ensure_bufread_cmd()
   local buf_name = "lreview_issue://" .. i.provider .. "/" .. i.repo .. "/" .. i.number
 
   local bufnr = vim.fn.bufnr(buf_name)
@@ -44,23 +76,20 @@ function M.open(i)
     vim.keymap.set("n", "q", "<cmd>close<cr>", opts)
     -- Reads the number back off the buffer: a reused buffer must re-sync the
     -- issue it is showing, not the one whose closure happened to be first.
-    vim.keymap.set("n", "S", function()
-      local num = tonumber(vim.b[bufnr].lreview_issue_number)
-      if not num then return end
-      issues.pull_one_async(num, function(ok, fresh, err)
-        if not ok then
-          vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-          return
-        end
-        M.render(bufnr, fresh)
-        vim.notify("lreview: issue #" .. num .. " synced", vim.log.levels.INFO)
-      end)
-    end, opts)
+    vim.keymap.set("n", "S", function() sync_buffer(bufnr, true) end, opts)
+    vim.keymap.set("n", "r", function() sync_buffer(bufnr, true) end, opts)
+    vim.keymap.set("n", "<C-r>", function() sync_buffer(bufnr, true) end, opts)
   end
 
   vim.b[bufnr].lreview_issue_number = i.number
   M.state = { bufnr = bufnr, issue_id = i.issue_id }
   M.render(bufnr, i)
+
+  -- If comments exist remotely but haven't been cached yet, auto-fetch in background
+  local cached_notes = issues.notes(i.issue_id)
+  if (i.comment_count or 0) > 0 and #cached_notes == 0 then
+    sync_buffer(bufnr, false)
+  end
 
   local winids = vim.fn.win_findbuf(bufnr)
   if #winids > 0 then
@@ -71,10 +100,21 @@ function M.open(i)
 end
 
 --- Write the buffer body: metadata, description, discussion.
+--- Preserves window view and cursor position across active windows.
 ---@param bufnr integer
 ---@param i table
 function M.render(bufnr, i)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
+
+  -- Save view in all windows displaying this buffer
+  local winids = vim.fn.win_findbuf(bufnr)
+  local views = {}
+  for _, wid in ipairs(winids) do
+    if vim.api.nvim_win_is_valid(wid) then
+      views[wid] = vim.api.nvim_win_call(wid, vim.fn.winsaveview)
+    end
+  end
+
   local lines = {}
   lines[#lines + 1] = "# " .. (i.title or "(no title)")
   lines[#lines + 1] = ""
@@ -116,6 +156,15 @@ function M.render(bufnr, i)
   vim.bo[bufnr].bufhidden = "wipe"
   vim.bo[bufnr].filetype = "markdown"
   vim.bo[bufnr].swapfile = false
+
+  -- Restore view in all windows displaying this buffer
+  for wid, view in pairs(views) do
+    if vim.api.nvim_win_is_valid(wid) then
+      pcall(vim.api.nvim_win_call, wid, function()
+        vim.fn.winrestview(view)
+      end)
+    end
+  end
 end
 
 --- Pick an issue from the local cache (pulling first when the cache is empty or

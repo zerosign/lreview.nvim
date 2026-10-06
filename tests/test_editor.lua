@@ -246,7 +246,57 @@ if not last_complete or #last_complete.matches ~= 1 or last_complete.matches[1].
   os.exit(1)
 end
 
-print("SUCCESS: Comment Scratchpad and Autocomplete Tests verified.")
+-- Test G: Code suggestion insertion and discard keymaps
+-- Create a dummy code buffer to supply context lines
+vim.cmd("silent! %bwipeout!")
+local test_code_buf = vim.api.nvim_create_buf(false, true)
+vim.api.nvim_buf_set_name(test_code_buf, "lua/lreview/test_file.lua")
+vim.api.nvim_buf_set_lines(test_code_buf, 0, -1, false, {
+  "function hello()",
+  "  print('world')",
+  "end"
+})
+vim.api.nvim_set_current_buf(test_code_buf)
+
+editor.open_new_comment("lua/lreview/test_file.lua", 1, 3)
+local scratch_win = vim.api.nvim_get_current_win()
+local scratch_buf = vim.api.nvim_win_get_buf(scratch_win)
+
+-- Verify discard keymaps are mapped on scratchpad buffer
+local keymaps = vim.api.nvim_buf_get_keymap(scratch_buf, "n")
+local found_q = false
+local found_esc = false
+local found_cg = false
+for _, km in ipairs(keymaps) do
+  if km.lhs == "q" then found_q = true end
+  if km.lhs == "<Esc>" or km.lhs == "<esc>" then found_esc = true end
+  if km.lhs == "<C-G>" or km.lhs == "<C-g>" then found_cg = true end
+end
+
+if not found_q or not found_esc or not found_cg then
+  print("FAIL: Expected scratchpad keymaps (q, <esc>, <C-g>) not found.")
+  os.exit(1)
+end
+
+-- Verify <C-g> suggestion insertion
+for _, km in ipairs(keymaps) do
+  if (km.lhs == "<C-G>" or km.lhs == "<C-g>") and km.callback then
+    km.callback()
+    break
+  end
+end
+
+local buf_lines = vim.api.nvim_buf_get_lines(scratch_buf, 0, -1, false)
+local joined = table.concat(buf_lines, "\n")
+if not joined:find("```suggestion") or not joined:find("print%('world'%)") then
+  print("FAIL: <C-g> did not insert suggestion block with context lines.")
+  os.exit(1)
+end
+
+-- Close scratchpad
+pcall(vim.api.nvim_win_close, scratch_win, true)
+
+print("SUCCESS: Comment Scratchpad, Discard Keymaps, and Autocomplete Tests verified.")
 
 -- Teardown
 adapter.resolve = original_resolve

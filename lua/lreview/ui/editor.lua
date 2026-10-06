@@ -24,7 +24,8 @@ end
 --- Create the scratchpad window and buffer.
 ---@param initial_text string|nil
 ---@param save_callback fun(text: string)
-local function create_scratchpad(initial_text, save_callback)
+---@param extra_opts table|nil
+local function create_scratchpad(initial_text, save_callback, extra_opts)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].filetype = "markdown"
   vim.bo[buf].buftype = "acwrite"  -- Custom write protocol to allow :w
@@ -88,6 +89,39 @@ local function create_scratchpad(initial_text, save_callback)
   vim.keymap.set("i", "<C-cr>", "<cmd>w<cr>", opts)
   vim.keymap.set("n", "<leader>s", "<cmd>w<cr>", opts)
   vim.keymap.set({ "n", "i" }, "<C-s>", "<cmd>w<cr>", opts)
+
+  -- Clean exit and discard keymaps
+  local function close_scratchpad(force)
+    if not vim.api.nvim_win_is_valid(win) then return end
+    local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+    local cur_text = vim.trim(table.concat(lines, "\n"))
+    local orig_text = vim.trim(initial_text or "")
+    if not force and cur_text ~= "" and cur_text ~= orig_text then
+      local choice = vim.fn.confirm("Discard comment?", "&Yes\n&No", 2)
+      if choice ~= 1 then return end
+    end
+    vim.bo[buf].modified = false
+    vim.api.nvim_win_close(win, true)
+  end
+
+  vim.keymap.set("n", "q", function() close_scratchpad(false) end, opts)
+  vim.keymap.set("n", "<esc>", function() close_scratchpad(false) end, opts)
+  vim.keymap.set({ "n", "i" }, "<C-c>", function() close_scratchpad(false) end, opts)
+
+  -- Code suggestion shortcut (<C-g>) when context lines are available
+  if extra_opts and extra_opts.context_lines and #extra_opts.context_lines > 0 then
+    local function insert_suggestion()
+      local s_lines = { "```suggestion" }
+      for _, cl in ipairs(extra_opts.context_lines) do
+        s_lines[#s_lines + 1] = cl
+      end
+      s_lines[#s_lines + 1] = "```"
+      local cur_row = vim.api.nvim_win_get_cursor(win)[1]
+      vim.api.nvim_buf_set_lines(buf, cur_row - 1, cur_row - 1, false, s_lines)
+      pcall(vim.api.nvim_win_set_cursor, win, { cur_row + 1, 0 })
+    end
+    vim.keymap.set({ "n", "i" }, "<C-g>", insert_suggestion, opts)
+  end
 
   -- Completion in the scratchpad:
   --   @mention  -> cached repo users (see :LocalReviewPullUser)
@@ -266,6 +300,15 @@ function M.open_new_comment(path, start_line, end_line)
   end
   local mo_id = review.current.detail.mo_id
 
+  local context_lines = nil
+  local cur_buf = vim.api.nvim_get_current_buf()
+  if cur_buf and vim.api.nvim_buf_is_valid(cur_buf) then
+    local total = vim.api.nvim_buf_line_count(cur_buf)
+    local s = math.max(1, math.min(start_line, total))
+    local e = math.max(s, math.min(end_line, total))
+    context_lines = vim.api.nvim_buf_get_lines(cur_buf, s - 1, e, false)
+  end
+
   create_scratchpad(nil, function(text)
     local submit_immediately = config.get_defaults().submit_immediately
     if submit_immediately then
@@ -307,7 +350,7 @@ function M.open_new_comment(path, start_line, end_line)
       decor.refresh(bufnr)
     end
     vim.notify("lreview: draft comment added", vim.log.levels.INFO)
-  end)
+  end, { context_lines = context_lines })
 end
 
 --- Create an MR scratchpad editor for multi-line description and title editing.

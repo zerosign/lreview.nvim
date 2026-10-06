@@ -185,6 +185,12 @@ vim.cmd("LocalReviewPull")
 assert(pulled, "LocalReviewPull should invoke review.pull_review_async")
 review.pull_review_async = orig_pull
 
+-- Test quickfix command
+vim.cmd("LocalReviewQuickfix")
+local qflist = vim.fn.getqflist()
+assert(#qflist > 0, "LocalReviewQuickfix should populate quickfix list with threads")
+assert(qflist[1].lnum == 10, "quickfix item should have correct line number")
+
 -- Test unlinked fallback when adapter returns nil MR
 local orig_changed = git.changed_files
 local orig_curr = git.current_branch

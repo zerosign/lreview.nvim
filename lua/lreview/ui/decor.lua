@@ -244,47 +244,140 @@ function M.get_thread_lines(bufnr)
   return lines
 end
 
---- Jump to the next review thread in the current buffer.
+local function get_mr_threads_sorted()
+  if not review.current or not review.current.detail then return {} end
+  local mo_id = review.current.detail.mo_id
+  local all = comments.threads_for_mr(mo_id)
+  table.sort(all, function(a, b)
+    if a.path == b.path then
+      return (a.start_line or 0) < (b.start_line or 0)
+    end
+    return (a.path or "") < (b.path or "")
+  end)
+  return all
+end
+
+local function jump_to_thread(t)
+  if not t or not review.current then return end
+  local root = review.current.cwd or vim.fn.getcwd()
+  local target_path = root .. "/" .. t.path
+  local cur_buf = vim.api.nvim_get_current_buf()
+  local cur_abs = vim.api.nvim_buf_get_name(cur_buf)
+  if cur_abs ~= target_path then
+    vim.cmd("edit " .. vim.fn.fnameescape(target_path))
+  end
+  local target_buf = vim.api.nvim_get_current_buf()
+  pcall(vim.api.nvim_win_set_cursor, 0, { t.start_line, 0 })
+  require("lreview.ui.thread_view").show(target_buf, t.path, t.start_line)
+end
+
+--- Jump to the next review thread across the MR.
 function M.next_thread()
   local bufnr = vim.api.nvim_get_current_buf()
+  local rel_path = get_rel_path(bufnr)
   local lines = M.get_thread_lines(bufnr)
-  if #lines == 0 then
-    vim.notify("lreview: no review comments in this buffer", vim.log.levels.WARN)
-    return
-  end
   local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+
+  -- Try within current buffer first
   for _, l in ipairs(lines) do
     if l > cursor_line then
       vim.api.nvim_win_set_cursor(0, { l, 0 })
-      require("lreview.ui.thread_view").show(bufnr, get_rel_path(bufnr), l)
+      require("lreview.ui.thread_view").show(bufnr, rel_path, l)
       return
     end
   end
-  -- wrap around to first
-  vim.api.nvim_win_set_cursor(0, { lines[1], 0 })
-  require("lreview.ui.thread_view").show(bufnr, get_rel_path(bufnr), lines[1])
-end
 
---- Jump to the previous review thread in the current buffer.
-function M.prev_thread()
-  local bufnr = vim.api.nvim_get_current_buf()
-  local lines = M.get_thread_lines(bufnr)
-  if #lines == 0 then
-    vim.notify("lreview: no review comments in this buffer", vim.log.levels.WARN)
+  -- Advance across MR files
+  local all = get_mr_threads_sorted()
+  if #all == 0 then
+    vim.notify("lreview: no review comments in this review", vim.log.levels.WARN)
     return
   end
+
+  if rel_path then
+    for _, t in ipairs(all) do
+      if (t.path > rel_path) or (t.path == rel_path and (t.start_line or 0) > cursor_line) then
+        jump_to_thread(t)
+        return
+      end
+    end
+  end
+
+  -- Wrap around to first thread in the review
+  jump_to_thread(all[1])
+end
+
+--- Jump to the previous review thread across the MR.
+function M.prev_thread()
+  local bufnr = vim.api.nvim_get_current_buf()
+  local rel_path = get_rel_path(bufnr)
+  local lines = M.get_thread_lines(bufnr)
   local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+
+  -- Try within current buffer first
   for i = #lines, 1, -1 do
     local l = lines[i]
     if l < cursor_line then
       vim.api.nvim_win_set_cursor(0, { l, 0 })
-      require("lreview.ui.thread_view").show(bufnr, get_rel_path(bufnr), l)
+      require("lreview.ui.thread_view").show(bufnr, rel_path, l)
       return
     end
   end
-  -- wrap around to last
-  vim.api.nvim_win_set_cursor(0, { lines[#lines], 0 })
-  require("lreview.ui.thread_view").show(bufnr, get_rel_path(bufnr), lines[#lines])
+
+  -- Move backward across MR files
+  local all = get_mr_threads_sorted()
+  if #all == 0 then
+    vim.notify("lreview: no review comments in this review", vim.log.levels.WARN)
+    return
+  end
+
+  if rel_path then
+    for i = #all, 1, -1 do
+      local t = all[i]
+      if (t.path < rel_path) or (t.path == rel_path and (t.start_line or 0) < cursor_line) then
+        jump_to_thread(t)
+        return
+      end
+    end
+  end
+
+  -- Wrap around to last thread in the review
+  jump_to_thread(all[#all])
+end
+
+--- Populate Neovim quickfix list with all review threads.
+function M.populate_quickfix()
+  if not review.current or not review.current.detail then
+    vim.notify("lreview: no active review; run LocalReviewStart first", vim.log.levels.WARN)
+    return
+  end
+  local threads = get_mr_threads_sorted()
+  if #threads == 0 then
+    vim.notify("lreview: no review comments in this review", vim.log.levels.INFO)
+    return
+  end
+  local root = review.current.cwd or vim.fn.getcwd()
+  local qf_items = {}
+  for _, t in ipairs(threads) do
+    local cs = comments.comments_for_thread(t.t_id)
+    local first = cs[1]
+    local preview = first and first.body or "(no content)"
+    preview = preview:gsub("[\r\n]+", " ")
+    local author = first and first.author or "me"
+    local status = comments.thread_is_resolved(t.state) and "[Resolved]"
+        or (comments.thread_is_draft(t.state) and "[Draft]" or "[Active]")
+    local abs_path = root .. "/" .. t.path
+    qf_items[#qf_items + 1] = {
+      filename = abs_path,
+      lnum = t.start_line,
+      col = 1,
+      text = string.format("%s @%s: %s", status, author, preview),
+    }
+  end
+  vim.fn.setqflist(qf_items, "r")
+  pcall(vim.fn.setqflist, {}, "a", { title = "LReview: #" .. tostring(review.current.detail.number) })
+  vim.cmd("copen")
+  vim.notify(string.format("lreview: loaded %d comment(s) into quickfix", #qf_items), vim.log.levels.INFO)
 end
 
 return M

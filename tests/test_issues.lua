@@ -387,6 +387,15 @@ check(#lines > 0, "issue buffer contains markdown lines")
 vim.cmd("LocalReviewIssue 101")
 check(vim.api.nvim_get_current_buf() == bufnr, ":LocalReviewIssue 101 focuses issue buffer")
 
+local ib_keymaps = vim.api.nvim_buf_get_keymap(bufnr, "n")
+local found_ib_r = false
+local found_ib_s = false
+for _, km in ipairs(ib_keymaps) do
+  if km.lhs == "r" then found_ib_r = true end
+  if km.lhs == "S" then found_ib_s = true end
+end
+check(found_ib_r and found_ib_s, "issue buffer has r and S reload keymaps")
+
 -- Regression: issue body containing build errors must not trigger false Command failed
 local mock_err_body = '[{"number":18,"title":"FreeBSD Build?","body":"error: failed to run custom build command\\nfailed to download webrtc: 404 Not Found"}]'
 local raw_res = base.run({"gh", "api"}, { executor = function() return { stdout = mock_err_body, stderr = "", code = 0 } end })

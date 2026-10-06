@@ -395,6 +395,13 @@ local function cmd_prev()
   end)
 end
 
+local function cmd_quickfix()
+  ensure_review_started(function(ok)
+    if not ok then return end
+    require("lreview.ui.decor").populate_quickfix()
+  end)
+end
+
 local function cmd_request_review(args)
   ensure_review_started(function(started)
     if not started then return end
@@ -526,6 +533,8 @@ function M.register_commands()
   api.nvim_create_user_command("LocalReviewSummary", cmd_summary, {})
   api.nvim_create_user_command("LocalReviewNext", cmd_next, {})
   api.nvim_create_user_command("LocalReviewPrev", cmd_prev, {})
+  api.nvim_create_user_command("LocalReviewQuickfix", cmd_quickfix, {})
+  api.nvim_create_user_command("LocalReviewQf", cmd_quickfix, {})
   api.nvim_create_user_command("LocalReviewConflicts", cmd_conflicts, {})
   api.nvim_create_user_command("LocalReviewIssues", cmd_issues, {
     nargs = "?",
