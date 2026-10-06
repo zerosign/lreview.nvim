@@ -382,7 +382,15 @@ function M.parse_json(res)
   if not res.ok then
     return nil, res.error
   end
-  local ok, data = pcall(vim.json.decode, res.stdout)
+  local s = trim(res.stdout)
+  if s == "" then
+    local err_detail = trim(res.stderr) ~= "" and normalize_error(res.stderr) or "empty response from CLI"
+    return nil, err_detail
+  end
+  if s:sub(1, 1) ~= "{" and s:sub(1, 1) ~= "[" then
+    return nil, normalize_error(s)
+  end
+  local ok, data = pcall(vim.json.decode, s)
   if not ok then
     return nil, "failed to parse JSON: " .. tostring(data)
   end

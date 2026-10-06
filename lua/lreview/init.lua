@@ -236,7 +236,7 @@ local function ensure_review_started(callback)
     return
   end
   review.init_session_async(vim.fn.getcwd(), function(detail, err)
-    if not detail then
+    if not detail and not review.current then
       vim.notify("lreview: failed to start review session: " .. tostring(err), vim.log.levels.ERROR)
       callback(false)
       return
@@ -489,7 +489,11 @@ local function cmd_start()
   -- (glab mr view, often 2-3s) never blocks the UI.
   local fallback = review.init_session_async(cwd, function(detail, err)
     if not detail then
-      vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+      if review.current and review.current.detail and review.current.detail.unlinked then
+        vim.notify("lreview: draft review session ready (no linked MR yet)", vim.log.levels.INFO)
+      else
+        vim.notify("lreview: " .. tostring(err), vim.log.levels.WARN)
+      end
       return
     end
     if detail.unlinked then
