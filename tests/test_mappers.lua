@@ -256,6 +256,25 @@ if gh_issue2.state ~= "closed" or gh_issue2.milestone ~= "v1.0" or #gh_issue2.as
   os.exit(1)
 end
 
+-- Test gh_issues_to_issues array filtering (issue with vim.NIL pull_request vs real PR)
+local mock_gh_pr_as_issue = {
+  number = 20,
+  title = "A Pull Request",
+  pull_request = { url = "https://api.github.com/repos/MaikBuse/gosuto/pulls/20" },
+  user = { login = "pr-author" },
+}
+local mock_gh_issue_with_nil_pr = {
+  number = 21,
+  title = "A Regular Issue",
+  pull_request = vim.NIL,
+  user = { login = "issue-author" },
+}
+local filtered_issues = mappers.gh_issues_to_issues({ mock_gh_pr_as_issue, mock_gh_issue_with_nil_pr }, "MaikBuse/gosuto")
+if #filtered_issues ~= 1 or filtered_issues[1].number ~= 21 then
+  print("FAIL: gh_issues_to_issues failed to filter PR or improperly dropped issue with pull_request = vim.NIL.")
+  os.exit(1)
+end
+
 -- Mock GitHub issue note with vim.NIL
 local mock_gh_note = {
   id = 12345,

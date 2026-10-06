@@ -745,7 +745,7 @@ function M.get_issue(cfg, ctx, number)
   if not data then
     return nil, err
   end
-  if data.pull_request then
+  if data.pull_request and data.pull_request ~= vim.NIL then
     return nil, string.format("#%d is a pull request, not an issue", number)
   end
   return mappers.gh_issue_to_issue(data, ctx.repo), nil

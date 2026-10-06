@@ -310,7 +310,8 @@ end
 function M.gh_issues_to_issues(arr, repo)
   local out = {}
   for _, i in ipairs(arr or {}) do
-    if not i.pull_request then
+    local is_pr = i.pull_request and i.pull_request ~= vim.NIL
+    if not is_pr then
       out[#out + 1] = M.gh_issue_to_issue(i, repo)
     end
   end
