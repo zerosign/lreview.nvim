@@ -44,29 +44,78 @@ M.default_capabilities = {
 ---@field code integer
 ---@field error string|nil  -- normalized error message when not ok
 
--- Error markers to scan for in combined output.
-local ERROR_MARKERS = {
-  "gh: ",                   -- gh api errors: "gh: Not Found (HTTP 404)"
-  "glab: ",                 -- glab api errors
-  "ERROR",                  -- glab mr view: "ERROR: No open merge request..."
-  "failed to",              -- gh pr review: "failed to create review: ..."
-  "no pull requests found", -- gh pr view
-  "no merge request",       -- glab mr view
-  "No open merge request",
-  "HTTP 4",                 -- generic
-  "HTTP 5",
-}
+--- Detect whether output indicates an error despite exit code 0.
+---
+--- gh/glab return exit code 0 on some plain-text errors (e.g. `glab mr view` when
+--- no MR exists, or `gh pr view` when no PR exists). However, successful JSON
+--- responses (such as issue lists, MR details, or diff comments) frequently
+--- contain user-written text like "failed to build", "HTTP 404", or "ERROR in logs".
+---
+--- Therefore:
+--- 1. If stdout is a JSON array (`[...]`), it is a list of items and NEVER an error.
+--- 2. If stdout is a JSON object (`{...}`), only treat as an error if it matches
+---    an API error structure (e.g. `{"message": ...}` without entity fields).
+--- 3. Otherwise (plain text or stderr), check for true CLI error markers.
+---@param stdout string
+---@param stderr string|nil
+---@return boolean is_error, string|nil error_message
+local function check_error(stdout, stderr)
+  stderr = stderr or ""
+  stdout = stdout or ""
 
---- Detect whether combined output indicates an error.
+  -- Check stderr first for explicit CLI error messages
+  if stderr:find("gh: ", 1, true)
+      or stderr:find("glab: ", 1, true)
+      or stderr:find("failed to create review", 1, true) then
+    return true, stderr
+  end
+
+  local s_trimmed = stdout:match("^%s*(.-)%s*$") or ""
+
+  -- JSON array is always a successful collection, never a CLI error
+  if s_trimmed:sub(1, 1) == "[" then
+    return false, nil
+  end
+
+  -- JSON object: distinguish API error payloads from entity payloads
+  if s_trimmed:sub(1, 1) == "{" then
+    local ok_j, data = pcall(vim.json.decode, s_trimmed)
+    if ok_j and type(data) == "table" then
+      if data.message and not (data.number or data.id or data.iid or data.title or data.name) then
+        return true, tostring(data.message)
+      end
+      if data.errors and not data.data then
+        return true, tostring(data.message or "API error")
+      end
+      return false, nil
+    end
+  end
+
+  -- Plain text error markers (for text commands returning exit code 0)
+  local plain_markers = {
+    "gh: ",
+    "glab: ",
+    "ERROR: ",
+    "failed to create review",
+    "no pull requests found",
+    "no merge request",
+    "No open merge request",
+  }
+  for _, m in ipairs(plain_markers) do
+    if stdout:find(m, 1, true) or stderr:find(m, 1, true) then
+      return true, stdout ~= "" and stdout or stderr
+    end
+  end
+
+  return false, nil
+end
+
+--- Backward-compatible helper for callers passing a combined string.
 ---@param combined string
 ---@return boolean
 local function looks_like_error(combined)
-  for _, marker in ipairs(ERROR_MARKERS) do
-    if combined:find(marker, 1, true) then
-      return true
-    end
-  end
-  return false
+  local is_err = check_error(combined, "")
+  return is_err
 end
 M.looks_like_error = looks_like_error
 
@@ -133,20 +182,19 @@ M.executor_override = nil
 local function build_result(argv, stdout, stderr, code)
   stdout = stdout or ""
   stderr = stderr or ""
-  local combined = stdout .. "\n" .. stderr
-  local ok = (code == 0) and not looks_like_error(combined)
+  local is_err, detected_msg = check_error(stdout, stderr)
+  local ok = (code == 0) and not is_err
   local err_msg = nil
   if not ok then
-    -- The command line is echoed to the user on failure, so it goes through the
-    -- same masking as timing records (op templates can embed a token).
+    local err_detail = detected_msg or normalize_error(stderr ~= "" and stderr or stdout)
     err_msg = string.format("Command failed: %s | Error: %s",
-      table.concat(M.redact_argv(argv), " "), normalize_error(combined))
+      table.concat(M.redact_argv(argv), " "), err_detail)
   end
   return {
     ok = ok,
     stdout = stdout,
     stderr = stderr,
-    combined = combined,
+    combined = stdout .. "\n" .. stderr,
     code = code or 1,
     error = err_msg,
   }

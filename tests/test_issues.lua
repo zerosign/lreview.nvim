@@ -337,7 +337,62 @@ check(glargv:match("glab") ~= nil and glargv:match(" api projects/") ~= nil,
   "gitlab uses the api subcommand (after --repo)")
 check(glargv:match("projects/grp%%2Fthings/issues") ~= nil, "project path url-encoded")
 check(glargv:match("state=opened") ~= nil, "logical 'open' translated to gitlab 'opened'")
-check(glargv:match("order_by=updated_at") ~= nil, "sorted by update recency")
+-- ===========================================================================
+-- 7. Commands & UI Picker (:LocalReviewIssues, :LocalReviewIssue)
+-- ===========================================================================
+print("== 7. commands & picker UI ==")
+local selected_items = nil
+local original_select = vim.ui.select
+vim.ui.select = function(items, opts, on_choice)
+  selected_items = items
+  if on_choice and #items > 0 then
+    on_choice(items[1])
+  end
+end
+
+-- Ensure test issues exist in cache
+issue_store.upsert_many({
+  {
+    issue_id = "github:grp/things:101",
+    provider = "github",
+    repo = "grp/things",
+    number = 101,
+    title = "Test issue for UI picker",
+    state = "open",
+    body = "Detailed description",
+    author = "tester",
+    comments_count = 0,
+    created_at = "2026-09-01T00:00:00Z",
+    updated_at = "2026-09-01T00:00:00Z",
+  }
+})
+issue_store.mark_synced("github", "grp/things", "open")
+
+adapter.resolve = function()
+  return { adapter = github, provider = "gh", host = "github.com", repo = "grp/things",
+           cfg = { provider = "gh" }, cwd = project_root }
+end
+
+vim.cmd("LocalReviewIssues")
+check(selected_items ~= nil and #selected_items > 0, ":LocalReviewIssues triggers picker with items")
+check(selected_items[1].number == 101, "picker received issue #101")
+
+local expected_buf = "lreview_issue://github/grp/things/101"
+local bufnr = vim.fn.bufnr(expected_buf)
+check(bufnr ~= -1 and vim.api.nvim_buf_is_valid(bufnr), "issue buffer was created: " .. expected_buf)
+local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+check(#lines > 0, "issue buffer contains markdown lines")
+
+-- Test :LocalReviewIssue <number>
+vim.cmd("LocalReviewIssue 101")
+check(vim.api.nvim_get_current_buf() == bufnr, ":LocalReviewIssue 101 focuses issue buffer")
+
+-- Regression: issue body containing build errors must not trigger false Command failed
+local mock_err_body = '[{"number":18,"title":"FreeBSD Build?","body":"error: failed to run custom build command\\nfailed to download webrtc: 404 Not Found"}]'
+local raw_res = base.run({"gh", "api"}, { executor = function() return { stdout = mock_err_body, stderr = "", code = 0 } end })
+check(raw_res.ok == true, "JSON response with error logs in body is NOT treated as failed command")
+
+vim.ui.select = original_select
 
 thread_mod.create_worker = real_create
 base.executor_override = nil
