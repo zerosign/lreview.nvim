@@ -52,21 +52,46 @@ All issues discussed are grouped into **four problem domains**:
 | [11-plan-verification.md](11-plan-verification.md) | Per-plan test strategy (scenarios, checkpoints, risks, regressions, edge cases) + cross-plan conflict map (C1–C6) + implementation order + **§14 implementation status** | all plans |
 | [12-async-audit.md](12-async-audit.md) | **Empirical audit** of `uv.new_work` threads vs `vim._async` coroutines in headless nvim: thread `vim` proxy limits, sqlite.lua workarounds, no object sharing (isolated/safe), msgpack serialization, `vim._async` internal-API risk, hybrid option — **resolved: every restriction has a verified solution (§3.8), overheads negligible (§9)** | 09-async-model.md |
 
-## Implementation Status (as of rediscovery)
+## Implementation Status (current)
 
-- **Implemented:** docs 01, 02, 03, 05, 06, 08; thread model core (09) — `thread.lua`, `base.lua` io.popen, `sync_review_thread`, `pull_review_async`, `gc_work` fix.
-- **Partially implemented:** doc 04 (sync-bus core done; diff-cache invalidation + bus-bypass remain), doc 07 (`IN_FLIGHT` + txn + batched reconcile done; submit-on-thread + decomposition + crash recovery remain).
-- **Remaining work (consolidated):** `vim.notify` replay from thread, `sync_review` decomposition, submit-on-thread, `IN_FLIGHT` crash recovery, diff-cache invalidation, sync-bus bypass fix, `git.changed_lines` on thread. See doc 11 §14.
+- **Implemented:** docs 01, 02, 03, 05, 06, 08; the full thread model (09) —
+  `thread.lua`, `base.lua` io.popen fallback, `sync_review_thread`,
+  `pull_review_async`, `gc_work` fix, `vim.notify` replay from threads,
+  `git.changed_lines` on a worker thread, and **per-call callback slots**
+  (`thread.arm` / `thread.dispatch_cb`) so singleton workers no longer replay the
+  first caller's callback.
+- **Implemented with a changed mechanism:** doc 07 (submit atomicity). Everything
+  it asked for is in place — submit-on-thread, `sync_review` decomposition,
+  per-op idempotency, crash recovery, partial-failure feedback — but the transient
+  push state is **not** `comments.state = IN_FLIGHT`. It is a `push_ops` outbox
+  table (`QUEUED → RUNNING → DONE | FAILED` + `uncertain`), because encoding the
+  lock on the comment stranded drafts outside `PENDING_PUSH_MASK` and duplicated
+  notes on non-atomic hubs. See doc 07 §2.6.1b and its status banner.
+- **Doc 04 (sync bus):** core done, diff-cache invalidation wired (session start,
+  pull, submit), and refresh routed through the bus rather than bypassing it.
+- **New since these plans were written (no design doc yet):**
+  - **Offline issue tracker cache** (`issues` + `issue_notes` tables, FTS5,
+    sequential page driver with progress, `:LocalReviewIssues` / `:LocalReviewIssue`
+    / `:LocalReviewIssuePull`) so an MR description's linked issues are readable
+    locally — this is the "why did this change happen" half of reviewing.
+  - **Adapter capability additions** `atomic_inline_batch`,
+    `verdict_in_review_batch`, `issues`, plus `submit_verdict` / `list_issues` /
+    `get_issue` / `fetch_issue_notes` in the adapter contract (doc 08 §table).
+  - **`:LocalReviewConflicts`** — the conflict-gate error message previously
+    pointed at a command that did not exist; the storage transitions had no UI.
+  - **Schema v4 + index policy** — branch resolution moved from a payload scan to
+    flat indexed columns; partial indexes for predicate-only hot queries.
+  - **`base.executor_override`** test seam + `tests/test_submit_contract.lua`,
+    which asserts the exact CLI argv per hub. This is what catches contract drift
+    (endpoint/argument shape) that the mock-based tier structurally cannot see.
+  - **argv redaction** (`base.redact_argv`) so command lines reaching logs or
+    error notifications never carry a token or a full comment body.
 
 ## Recommended Implementation Order
 
-> **Update:** most plans are now **implemented**. The remaining work is
-> consolidated in doc 11 §14.3/§14.4. The recommended next order is:
-> 1. `vim.notify` replay from thread + `sync_review` decomposition (07/09)
-> 2. submit-on-thread (07)
-> 3. `IN_FLIGHT` crash recovery (07)
-> 4. sync-bus wiring: diff-cache invalidation + bus-bypass fix (04)
-> 5. `git.changed_lines` on thread (09 §8.3/B)
+> **Update:** the plans below are now implemented. Remaining follow-ups are
+> listed in doc 07 §8.2 (multi-line comment ranges, head-sha pre-flight, further
+> reconcile decomposition) and doc 11 §14.
 
 The original dependency-ordered plan (for reference):
 

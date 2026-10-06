@@ -150,7 +150,10 @@ remote changes, probe invalidation). This is the complete matrix.
 | `list_templates` | template picker | 05 | `list_templates` ✅ | `:LocalReviewCreate` → template picker | **probe** (repo has templates?) |
 | `inline_comments` | line-level comments | core | `submit_inline_review` ✅ | `add_comment` (visual select) | sync reconcile |
 | `resolve_threads` | resolve / reopen | core | `resolve_thread` ✅ | `:LocalReviewResolve` / toggle | sync reconcile (remote resolve) |
-| `batch_submit` | batch new-thread submit | 07 | `submit_inline_review` ✅ | `submit_review` (batch path) | partial-failure retry; `IN_FLIGHT` state |
+| `batch_submit` | batch new-thread submit | 07 | `submit_inline_review` ✅ | `submit_review` (batch path) | partial-failure retry; outbox `DONE` is terminal |
+| `atomic_inline_batch` | that batch call is all-or-nothing | 07 | `submit_inline_review` ✅ | `_submit_pushes` create path: one call (GitHub) vs per-note loop committing each success (GitLab) | verdict may ride the batch |
+| `verdict_in_review_batch` | the review event rides the comment batch | 07 | `submit_verdict` ✅ | `build_ops` decides: ride along, or emit a separate verdict op | silent verdict drops (the v3 bug) |
+| `issues` | hub exposes an issue tracker | new | `list_issues` / `get_issue` / `fetch_issue_notes` ✅ | `:LocalReviewIssuePull` / `:LocalReviewIssues` | — |
 | `assign_reviewers` | assign reviewers | 06 | `list_users` ✅ | reviewer picker → assign | — |
 | `offline_staging` | stage reviewer selection offline | 06 | TBD | stage → push later | submit push |
 
@@ -175,7 +178,7 @@ feature but a mechanism other plans depend on. The impact differs by plan:
 
 | Plan | How capabilities affect it | Reference |
 |:--|:--|:--|
-| **Doc 07 (submit atomicity)** | `batch_submit` **gates the code path** (batch vs one-by-one) → changes the atomicity requirements. One-by-one path needs the `IN_FLIGHT` + idempotent-retry machinery to be rock-solid. `review_verdict` gates the verdict popup on submit. | doc 07 §2.1, §2.5 |
+| **Doc 07 (submit atomicity)** | `batch_submit` + `atomic_inline_batch` **select the code path** (one all-or-nothing call vs a per-note loop that commits each success), which is exactly what determines whether a partial failure can duplicate a note. `verdict_in_review_batch` decides whether the verdict rides that call or becomes its own op. `review_verdict` gates whether the verdict popup is offered at all. | doc 07 §2.6.1b, §8.1 |
 | **Doc 09 (async model)** | The **runtime probe** (doc 05 §2.4) is network I/O → runs on the `uv.new_work` thread. Probed capabilities (`draft_mr`, `approve_mr`, `list_templates`) gate the create-flow options — and that create flow runs on the thread. Capabilities both *decide what work exists* and *run on the thread*. | doc 09 §8.6 |
 | **Doc 03 (review verdict)** | `review_verdict` gates whether the verdict popup is offered on submit. | doc 03 §2 |
 | **Doc 05 (MR lifecycle)** | `draft_mr`/`update_mr`/`close_mr`/`approve_mr`/`list_templates` gate the create/update/close commands; the runtime probe refines them per-repo. | doc 05 §2.4 |

@@ -6,13 +6,13 @@
 > flags **cross-plan conflicts** — places where two plans disagree or depend on
 > each other in ways that could break if implemented independently.
 
-> **✅ Implementation status (rediscovered):** docs 01, 02, 03, 05, 06, 08 are
-> **implemented**; doc 04 (sync-bus) and doc 07 (submit atomicity) are
-> **partially implemented** (see their status headers); doc 09's thread model is
-> **largely implemented** (`thread.lua`, `base.lua` io.popen, `sync_review_thread`).
-> The **remaining work** is concentrated in: submit-on-thread (07), `sync_review`
-> decomposition (07), notification replay (09), diff-cache invalidation + bus
-> bypass (04), and `IN_FLIGHT` crash recovery (07). See §14.
+> **✅ Implementation status (current):** docs 01, 02, 03, 04, 05, 06, 08 and the
+> doc 09 thread model are **implemented** (including notification replay,
+> `git.changed_lines` on a worker, and per-call callback slots). Doc 07 shipped
+> with a **different mechanism** than drawn: the transient push state is the
+> `push_ops` outbox, not `comments.state = IN_FLIGHT` — see doc 07's status banner
+> and §2.6.1b before re-implementing anything from §2.1/§2.6.1/§2.7.
+> Remaining follow-ups: §14.3 / §14.4.
 
 ---
 
@@ -245,31 +245,51 @@ Offline multi-select picker, single API call, reviewer history.
 ## 7. Doc 07 — Submit Atomicity
 
 ### What to test
-Change-set computation, `IN_FLIGHT` state, idempotent retry, transactions, scaling.
+Change-set computation, outbox enqueue/dedupe and status transitions, idempotent
+retry, per-op commit transactions, verdict delivery, crash recovery + adoption,
+conflict gating, and the exact CLI argv each hub receives.
 
 ### Scenarios
-| Scenario | Setup | Expected |
-|:--|:--|:--|
-| S7.1 Full success | all pushes ok | all → SYNCED, `"Pushed N"` |
-| S7.2 Partial failure | 2nd of 5 fails | pushed → SYNCED, failed → revert, `"Pushed 1 of 5"` |
-| S7.3 Retry idempotent | re-run after partial | only failed items pushed (no double-push) |
-| S7.4 Crash mid-push | `IN_FLIGHT` left in DB | on startup, revert `IN_FLIGHT` to prior state |
-| S7.5 Conflict blocks | any CONFLICT | submit blocked until resolved |
-| S7.6 Batch vs one-by-one | `batch_submit` true/false | correct path per capability |
-| S7.7 Transaction atomicity | txn 1 / txn 2 | all-or-nothing per phase |
-| S7.8 Large MR | 3,400+ comments | batched reconcile (not N+1) — see Doc 10 |
+`Covered by` names `tests/test_submit_contract.lua` unless stated otherwise. It
+intercepts `adapter.base.executor_override`, so endpoint/argument assertions and
+scripted failures need no network and no credentials.
+
+| Scenario | Setup | Expected | Covered by |
+|:--|:--|:--|:--|
+| S7.1 Full success | all pushes ok | every op `DONE`, comments `SYNCED`/consumed, `pushed = N`, `remaining = 0` | §1 |
+| S7.2 Partial failure | 2nd of 5 replies fails | op 1 `DONE`, op 2 `FAILED`, ops 3-5 stay `QUEUED`, `remaining = 2`, category stops (no futile calls) | §3 |
+| S7.3 Retry idempotent | re-run after partial | exactly the 2 unpushed replies are sent; `enqueue` dedupes the open rows | §3 retry, §4 retry |
+| S7.4 Crash mid-push | op left `RUNNING` | `recover_stale()` → `QUEUED` + `uncertain`; reconcile adopts by body match (no duplicate), draft consumed | §5 |
+| S7.5 Conflict blocks | any `CONFLICT` | submit blocked, zero CLI calls, error names `:LocalReviewConflicts`; resolving unblocks it | §6 |
+| S7.6 Batch vs per-note | `atomic_inline_batch` true/false | GitHub: one review POST, nothing lands on failure. GitLab: per-note loop, each success committed immediately, so a mid-loop failure cannot re-post | §1 vs §4 |
+| S7.7 Transaction atomicity | local commit fails after a successful call | op marked `uncertain` (not `DONE`), error surfaced, no second post on retry | `test_state_machine_full.lua` §8 + `commit()` path |
+| S7.8 Large MR | 3,400+ comments | batched reconcile (one query + in-memory index), not N+1 — see Doc 10 benchmarks | doc 10 / `just bench` |
+| S7.9 Verdict never dropped | approve with only replies/edits | verdict becomes its own op and its own call | §2 |
+| S7.10 Verdict never doubled | verdict + new threads on GitHub | `event=` appears in exactly one call | §2 |
+| S7.11 Local-only delete | `DELETED` comment with no `remote_id` | consumed locally, **zero** API calls | §7 |
+| S7.12 Unthreadable reply | synced thread with no pushed parent | reported in `skipped`, no nil concatenation crash | §8 |
+| S7.13 Endpoint/arg drift | any mutation | argv contains the real remote id, not the comment body | §1, §4 |
 
 ### Checkpoints (before commit)
-- [ ] `IN_FLIGHT` is transient — never persists across crash (revert on startup).
-- [ ] Idempotency from state transitions, not a parallel "already pushed" list.
-- [ ] Transactions wrap local writes only; **never** the network call.
-- [ ] Batched reconcile (one query + in-memory index), not N+1.
-- [ ] `batch_submit` capability gates the path (C5 — needs 08).
+- [x] The push lock is transient and lives in `push_ops`, never in `comments.state`.
+- [x] `DONE` is terminal and `enqueue` dedupes on `(c_id, op)` — idempotency from
+      state, not a parallel "already pushed" list.
+- [x] Transactions wrap local writes only; **never** the network call.
+- [x] Batched reconcile (one query + in-memory index), not N+1.
+- [x] `batch_submit` / `atomic_inline_batch` select the path (C5 — needs 08).
+- [x] Nothing can end up unpushable: `pending` = every non-`DONE` row.
 
 ### Risks / Regressions
-- **Risk (C5):** needs 08 (`batch_submit`) + 09 (thread).
-- **Regression:** `submit_review`/`sync_review` are core — high blast radius.
-- **Edge:** crash during push (open Q2); `IN_FLIGHT` persisted vs in-memory (open Q1); one-by-one path correctness even when batch is common.
+- **Risk (C5):** needs 08 (`batch_submit` / `atomic_inline_batch`) + 09 (thread).
+- **Regression:** `submit_review` / `sync_review` are core — high blast radius.
+  The tier that guards it must stay offline: the unit tier previously ran a *live*
+  GitLab test because `just test`'s exclusion regex could not match
+  `test_push_live_gitlab.lua`. Integration tests are now listed by exact name in
+  `integration_tests` (justfile) and asserted absent by
+  `test_state_machine_full.lua` ("unit tier never reached the hub CLI").
+- **Edge:** per-note (non-atomic) path correctness matters more than the batch
+  path, because that is where duplicates were born.
+
 
 ---
 
@@ -412,30 +432,54 @@ When implementing plan X, which other plans could break?
 | 06 | `review.lua`, adapters | `assign_reviewers`, `LocalReviewRequestReview`, offline cache |
 | 08 | `adapter/init.lua`, `adapter/base.lua` | `default_capabilities`, `M.supports()`, overrides |
 
-### 14.2 Partially implemented
+### 14.2 Completed (with a changed mechanism)
 
-| Doc | Done | Remaining |
+| Doc | Done | Remaining follow-ups |
 |:--|:--|:--|
-| 04 (sync-bus) | `sync.lua` core (mark_dirty, debounce, flush, subscribe, diff cache) | Diff-cache invalidation never wired; `pull_review_async` bypasses bus |
-| 07 (submit) | `IN_FLIGHT`, `with_transaction`, `compute_change_set`, batched reconcile | Submit-on-thread; `sync_review` decomposition; `IN_FLIGHT` crash recovery |
-| 09 (async) | `thread.lua`, `base.lua` io.popen, `sync_review_thread`, `pull_review_async`, `gc_work` fix | `vim.notify` replay from thread; `git.changed_lines` on thread |
+| 04 (sync-bus) | `sync.lua` core (mark_dirty, debounce, flush, subscribe, diff cache); invalidation wired on session start / pull / submit; `get_changed_lines_async` on a worker | — |
+| 07 (submit) | **`push_ops` outbox** (replaced `IN_FLIGHT`), `with_transaction`, `compute_change_set`, `build_ops`, batched reconcile + uncertain adoption, submit-on-thread, `_fetch_remote_threads`/`_reconcile_threads` split, crash recovery, `:LocalReviewConflicts` | multi-line ranges, head-sha pre-flight (doc 07 §8.2) |
+| 09 (async) | `thread.lua`, `base.lua` io.popen, `sync_review_thread`, `pull_review_async`, `gc_work` fix, `vim.notify` replay, `git.changed_lines` on thread, **per-call callback slots** (`arm`/`dispatch_cb`) | — |
 
-### 14.3 The consolidated remaining-work list (all plans)
+### 14.3 Remaining work (current)
 
-1. **`vim.notify` replay from thread callback** (09/12) — currently silently
-   lost on the worker thread. **Correctness bug.**
-2. **`sync_review` decomposition** (07 §2.2) — enables submit-on-thread.
-3. **Submit-on-thread** (07 §2.5) — `submit_review_thread` + wrapper.
-4. **`IN_FLIGHT` crash recovery on startup** (07 §2.6.1).
-5. **Diff-cache invalidation wiring** (04) — on pull + branch change.
-6. **Sync-bus bypass fix** (04) — `pull_review_async` → `mark_dirty`+`flush_now`.
-7. **`git.changed_lines` on thread** (09 §8.3/B) — biggest UI-latency win.
+All seven items from the original list are done — including crash recovery, which
+shipped as `outbox.recover_stale()` + body-match adoption rather than reverting an
+`IN_FLIGHT` comment state.
+
+Discovered while closing them out, and also fixed:
+
+1. **Interactive submit was a no-op** — `confirm_submit` read the verdict from the
+   asynchronous confirm float immediately, so every real submit reported
+   "push cancelled". Now continuation-passing.
+2. **Edit/delete used the wrong adapter arity** — batch submit passed the comment
+   *body* where a remote id belonged and left `body` nil.
+3. **Conflicts had no exit** — the gate error named `:LocalReviewConflicts`, which
+   was never registered and had no callers.
+4. **The verdict was dropped** whenever a review had no new threads.
+5. **GitLab batches duplicated on retry** — the whole batch reverted after a
+   mid-loop failure, re-posting notes that had already landed.
+6. **Singleton workers replayed the first caller's callback** (submit, pull, close,
+   approve, resolve, create, request-reviewers, update).
+7. **`just test` ran a live GitLab test** — its exclusion regex
+   (`push_live\.lua$`) could never match `test_push_live_gitlab.lua`, so the
+   integration tier posted real comments during the "offline" run. Both tiers now
+   share one exact-name list, and `test_state_machine_full.lua` asserts the unit
+   tier never reaches the hub CLI.
+8. **`detail_editor` read `detail.body`** while mappers write `detail.description`,
+   so the MR description always rendered empty.
 
 ### 14.4 Recommended next implementation order
 
-1. **#1 + #2** (notification replay + decomposition) — one coherent unit in
-   `sync_review`, unblocks submit-on-thread.
-2. **#3** (submit-on-thread) — depends on #1/#2.
-3. **#4** (IN_FLIGHT recovery) — small, independent.
-4. **#5 + #6** (sync-bus wiring) — doc 04 completion.
-5. **#7** (`git.changed_lines` threaded) — biggest perf win, independent.
+1. **Multi-line comment ranges** (doc 07 §8.2 #1) — a selection spanning lines
+   still posts as one line on both hubs.
+2. **Head-sha pre-flight** (doc 07 §8.2 #2) — warn instead of failing when the
+   hub's head moved under a pending draft.
+3. **Surface linked issues while reviewing** — the cache and
+   `ui/issues.referenced()` exist; the payoff is a *hint* (extmark or one command),
+   not another panel.
+4. **Extension surface** — `User` events (`LReviewSessionEnter`,
+   `LReviewSubmitDone`, `LReviewConflict`, …), `register_hint_provider`, and
+   renderer delegation, so blame/diff/history come from diffview, neogit, snacks
+   and render-markdown in the user's config instead of lreview owning that UI.
+5. **More CLI contract coverage** (templates, create, resolve, users) through
+   `base.executor_override`.

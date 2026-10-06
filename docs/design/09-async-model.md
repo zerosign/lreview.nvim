@@ -624,8 +624,11 @@ replaces `vim.fn.input` with the scratchpad.)
 - **Doc 05 (MR lifecycle):** `create_mr`/`update_mr`/`close_mr`/`approve_mr` and
   the capability probe (§2.4) all run on the thread.
 - **Doc 07 (submit atomicity):** `submit_review`'s push path runs on the thread;
-  the `IN_FLIGHT` state + idempotent retry must be thread-aware (the state lives
-  in the DB, which the thread writes via its own connection).
+  the push lock is the `push_ops` row, written by the thread through its own WAL
+  connection — which is why a crash leaves a `RUNNING` row that
+  `recover_stale()` re-queues as `uncertain`, instead of a comment stranded in a
+  state the pending-push mask excludes. Per-call completion callbacks go through
+  `thread.arm` / `thread.dispatch_cb`, never a captured closure variable.
 - **Doc 08 (capability system):** the **runtime probe** (doc 05 §2.4) is network
   I/O → it runs on the thread. The **probed capabilities** (`draft_mr`,
   `approve_mr`, `list_templates`) gate what the create flow offers — and that

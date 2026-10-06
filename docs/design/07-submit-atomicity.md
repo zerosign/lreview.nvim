@@ -2,17 +2,32 @@
 
 **Area:** Core engine robustness (`review.lua`)
 **Domain:** 4 — Correctness & Maintainability
-**Status:** ⚠️ **Partially implemented — IN_FLIGHT + txn + batched reconcile done; submit-on-thread + decomposition not done**
+**Status:** ✅ **Implemented — superseded the `IN_FLIGHT` design with a `push_ops` outbox**
 
-> **Implementation status (rediscovered):** the **`IN_FLIGHT` state** +
-> `mark_in_flight`/`revert_in_flight`, the **`with_transaction` wrapper**, the
-> **`compute_change_set`**, and the **batched reconcile** (single query +
-> in-memory index, the ~11x doc-10 win) are all **implemented**. The bulk
-> `mark_in_flight` block runs inside `with_transaction` (Plan 07 §2.7). **Not
-> done:** (1) `submit_review` still runs **synchronously on the main thread**
-> (not on `uv.new_work`), (2) `sync_review` is **not decomposed** into
-> `_sync_threads`/`_reconcile_*` (still one ~220-line function), (3) no
-> `IN_FLIGHT` crash recovery on startup. See §8.
+> **Implementation status (current):** submit runs on `uv.new_work`
+> (`submit_review` → `submit_review_thread`), `sync_review` is decomposed into
+> `_fetch_remote_threads` + `_reconcile_threads`, the batched reconcile and the
+> `with_transaction` wrapper are in place, and crash recovery exists.
+>
+> **The `IN_FLIGHT` mechanism described throughout this document is NOT what
+> shipped, and should not be re-implemented.** Encoding the push lock in
+> `comments.state` (bit 4) failed in two ways:
+>
+> 1. **Stranding.** `PENDING_PUSH_MASK` deliberately excludes `IN_FLIGHT`, so any
+>    partial failure that left siblings marked made those drafts invisible to
+>    `get_pending_comments` — unpushable until the user restarted Neovim
+>    (`recover_in_flight` only ran on session init). Reverting only the *failed*
+>    item, as §2.7's code did, guaranteed this on every mid-batch error.
+> 2. **Duplicates.** Because success was recorded per category rather than per
+>    op, a platform whose API is one-note-per-call (GitLab) had its whole batch
+>    reverted to `DRAFT` after a mid-loop failure — re-posting the notes that had
+>    already landed on the next submit.
+>
+> The shipped design keeps §2.6's *separation of concerns* but moves the lock to
+> its own table: a comment's state describes only its **content**, and
+> `push_ops` rows (`QUEUED → RUNNING → DONE | FAILED`, plus `uncertain` after a
+> crash) describe **transmission**. See §2.6.1 and §2.6.2 below, and
+> `lua/lreview/storage/outbox.lua`.
 
 ---
 
@@ -69,6 +84,13 @@ a code smell.
 DB must reflect reality.
 
 **Approach — per-item `IN_FLIGHT` state + idempotent retry:**
+
+> **Superseded as written, kept for the reasoning.** The goal above is met, but
+> the mechanism is not this one: the transient state lives in the `push_ops`
+> outbox (§2.6.1b), not on the comment. Placing it on the comment is precisely
+> what broke the goal — the naming note below was the first symptom, since
+> "pending" vs "in flight" only conflicts when both are crammed into one column.
+> See the status banner at the top of this document.
 
 > **Naming note:** the transient state is `IN_FLIGHT` (not `PUSHING` or
 > `PENDING`). `PENDING` would collide with the existing `PENDING_PUSH_MASK`
@@ -283,32 +305,28 @@ around.
 > natively in leaf/GitHub markdown viewers (no plugin needed). Nodes = states,
 > edges = the action that triggers the transition.
 
-#### 2.6.1 Comment state machine
+#### 2.6.1 Comment state machine (content only)
 
-This is the core of the atomicity design. The `IN_FLIGHT` state is the transient
-"being pushed right now" node; everything else is the existing state machine.
+A comment's state describes **what its content is** relative to the hub. It says
+nothing about transmission — that is the outbox's job (§2.6.1b). This separation
+is the whole point: the v3 design folded the push lock into this graph as
+`IN_FLIGHT`, and that is what stranded drafts and duplicated notes.
 
 ```mermaid
 stateDiagram-v2
     [*] --> DRAFT : create comment / reply
 
-    DRAFT --> IN_FLIGHT : submit (push)
-    IN_FLIGHT --> SYNCED : push ok (store remote_id)
-    IN_FLIGHT --> DRAFT : push fail (revert)
+    DRAFT --> SYNCED : reply landed (remote id recorded)
+    DRAFT --> [*] : new thread landed (row consumed, reconcile re-imports)
 
     SYNCED --> MODIFIED : edit locally
     SYNCED --> DELETED : delete locally (soft)
 
-    MODIFIED --> IN_FLIGHT : submit (push)
-    IN_FLIGHT --> SYNCED : push ok
-    IN_FLIGHT --> MODIFIED : push fail (revert)
-
-    DELETED --> IN_FLIGHT : submit (push)
-    IN_FLIGHT --> [*] : push ok (hard delete)
-    IN_FLIGHT --> DELETED : push fail (revert)
-
+    MODIFIED --> SYNCED : edit landed (mark_clean)
     MODIFIED --> CONFLICT : remote edited while pending
     DELETED --> CONFLICT : remote edited while pending
+    DELETED --> [*] : delete landed
+
     CONFLICT --> MODIFIED : resolve keep-local
     CONFLICT --> SYNCED : resolve accept-remote
 ```
@@ -320,19 +338,61 @@ stateDiagram-v2
 | `[*] → DRAFT` | Create comment / reply | `add_comment` |
 | `SYNCED → MODIFIED` | Edit a synced comment | `update_comment_body_and_state(..., MODIFIED)` |
 | `SYNCED → DELETED` | Delete a synced comment (soft) | `soft_delete_comment` |
-| `→ IN_FLIGHT` | Submit (push in progress) | `mark_in_flight` |
-| `IN_FLIGHT → SYNCED` | Push succeeded | `mark_comment_synced` |
-| `IN_FLIGHT → [*]` | Delete pushed (hard) | `delete_comment` |
-| `IN_FLIGHT → <orig>` | Push failed (revert) | `revert_in_flight` |
+| `MODIFIED → SYNCED` | Edit pushed | `mark_clean` (inside the op's commit txn) |
+| `DRAFT → SYNCED` | Reply pushed | `mark_comment_synced` (inside the op's commit txn) |
+| `DRAFT/DELETED → [*]` | New thread / delete pushed | `delete_comment` (inside the op's commit txn) |
 | `MODIFIED/DELETED → CONFLICT` | Remote changed while pending | `mark_comment_conflict` |
 | `CONFLICT → MODIFIED` | Resolve keep-local | `resolve_conflict_keep_local` |
 | `CONFLICT → SYNCED` | Resolve accept-remote | `resolve_conflict_accept_remote` |
 
+Bit 4 is reserved (it was `IN_FLIGHT`) so a v3 row cannot be misread.
+
+#### 2.6.1b Push-op outbox state machine (transmission)
+
+Each pending mutation is one row in `push_ops`, keyed `(c_id, op)`. This is the
+`RUNNING`/`DONE`/`FAILED` machinery §2.1 asked for — kept in its own table so a
+comment's content state is never a lock.
+
+```mermaid
+stateDiagram-v2
+    [*] --> QUEUED : outbox.enqueue (dedupe on c_id + op)
+    QUEUED --> RUNNING : about to call the hub
+    RUNNING --> DONE : call ok and local transition committed
+    RUNNING --> FAILED : call errored
+    RUNNING --> QUEUED : all-or-nothing batch failed, nothing landed
+    RUNNING --> QUEUED : recover_stale after a crash, sets uncertain
+    FAILED --> RUNNING : the next submit retries it
+    QUEUED --> DONE : reconcile adopts it by body match (uncertain)
+    DONE --> [*] : prune_done / GC
+
+    DONE --> DONE : terminal, never re-executed
+```
+
+**Legend:**
+
+| Edge | Action | Function |
+|:--|:--|:--|
+| `[*] → QUEUED` | Build ops from the change-set, then queue | `review.build_ops` + `outbox.enqueue` |
+| `QUEUED → RUNNING` | Take the lock before the call | `outbox.mark_running` |
+| `RUNNING → DONE` | Commit success (same txn as the comment transition) | `outbox.mark_done` |
+| `RUNNING → FAILED` | Record the error, stop the category | `outbox.mark_failed` |
+| `RUNNING → QUEUED` | Batch failed as a whole (GitHub) | `outbox.mark_queued` |
+| `RUNNING → QUEUED(uncertain)` | Startup crash recovery | `outbox.recover_stale` |
+| `QUEUED → DONE` | Remote already has our body | `outbox.adopt` from `_reconcile_threads` |
+| `FAILED → RUNNING` | Retry | next `:LocalReviewSubmit` (`pending` includes FAILED) |
+
 **Invariants:**
-- `IN_FLIGHT` is **transient** — it must never persist across a crash (see open
-  question 2). On startup, any `IN_FLIGHT` item is reverted to its prior state.
-- `CONFLICT` is a **sink** for user action — it blocks submit until resolved.
-- `SYNCED` is the **stable** state — matches remote, not in the change-set.
+- A comment's state is **never** a push lock, so nothing can become unpushable
+  because a submit was interrupted.
+- `DONE` is **terminal**: `pending()` excludes it, and `enqueue` dedupes on
+  `(c_id, op)` over non-terminal rows, so a mutation cannot be queued twice.
+- `pending` = anything not `DONE` (`QUEUED`, `RUNNING`, `FAILED`) — FAILED rows
+  are retried by definition, which is why no revert step is needed anywhere.
+- `uncertain` is only ever set by crash recovery or a lost local commit, and is
+  the sole permission for reconcile to adopt a remote comment into a local op.
+- `CONFLICT` remains a **sink** requiring user action — it blocks submit until
+  `:LocalReviewConflicts` resolves it.
+- `SYNCED` is the **stable** state — matches remote, absent from the change-set.
 
 #### 2.6.2 Thread state machine
 
@@ -559,30 +619,58 @@ index.**
 
 ## 3. Flow / Sequence
 
-### Submit (revised — change-set + thread + feedback)
+### Submit (shipped — outbox-driven)
 
 ```
-submit_review()                                    [main thread]
-  ├─ compute_change_set(mo_id)                     → { additions, replies, updates, deletions }
-  ├─ check conflicts → block if any
-  ├─ confirm_popup (Doc 03)
-  ├─ queue submit_work:queue(cwd, detail, resolved, change_set)   [uv.new_work thread]
-  │    ├─ batch new threads → mark_synced(remote_id)
-  │    ├─ loop replies/updates/deletions:
-  │    │    mark_in_flight → push → mark_synced(remote_id) | revert_in_flight on fail
-  │    └─ sync_review()  ← ALWAYS runs, even on partial failure
-  └─ [vim.schedule callback] replay notifications + show outcome
-       (success / partial / failure per §2.4)
+submit_review(thread_id?, callback)                   [main thread]
+  ├─ guards: session, adapter.resolve, count_conflicts → bail if any
+  ├─ confirm_submit(resolved, thread_id, done)         [float; done fires on keypress]
+  │    └─ lines built from compute_change_set(mo_id)
+  └─ done(verdict, cancelled):
+       ├─ test mode → _submit_pushes(...) + sync_review()   [synchronous]
+       └─ else → ensure_submit_worker()
+                 thread.arm("review.submit", callback)      ← per-call callback
+                 submit_worker:queue({cwd, detail, thread_id, verdict})
+
+_submit_pushes(detail, resolved, ctx, thread_id, verdict)   [shared main/worker]
+  ├─ conflicts → return 0, "...:LocalReviewConflicts...", pending
+  ├─ build_ops(...)            → op descriptors (pure; verdict op when it cannot ride)
+  ├─ outbox.enqueue(ops)       1 txn, dedupe by (c_id, op), delete supersedes edit
+  └─ per category in create → reply → edit → delete → verdict:
+       ├─ outbox.mark_running(op)
+       ├─ adapter call
+       ├─ ok  → txn { outbox.mark_done(op, remote_id); comment transition }  pushed++
+       └─ err → outbox.mark_failed(op)  (or mark_queued for an atomic batch
+              that failed as a whole) → stop THIS category, rest stay QUEUED
+
+submit_review_thread(...)  [uv.new_work]
+  ├─ _submit_pushes(...)
+  ├─ _fetch_remote_threads + _reconcile_threads   (adopts uncertain ops)
+  ├─ outbox.prune_done(mo_id)
+  └─ return { ok, count, err, remaining, notifications }
+
+completion                                   [main thread, vim.schedule]
+  ├─ replay queued notifications
+  ├─ success → refresh_review_ui(): invalidate diff cache + mark_dirty + schedule
+  ├─ err      → vim.notify("push failed: ...")
+  ├─ remaining>0 → notify "N still queued, run :LocalReviewSubmit again"
+  └─ thread.dispatch_cb("review.submit", ok, count, err, remaining) → callback
 ```
 
 ### Sync (decomposed)
 
 ```
-sync_review()
-  ├─ fetch_threads()
-  ├─ _sync_threads()          → insert/update threads + comments
-  ├─ _reconcile_remote_comment_deletions()
-  └─ _reconcile_remote_thread_deletions()
+sync_review()  =  _fetch_remote_threads(detail, resolved, ctx)   [network]
+                  _reconcile_threads(detail, remote_threads)     [pure DB, one batch]
+
+_reconcile_threads() does, in order:
+  ├─ load every local comment for the MR once → in-memory index by (t_id, c_id)
+  ├─ build the uncertain-op index (outbox.uncertain_by_body) for crash adoption
+  ├─ upsert remote threads (DRAFT threads never overwritten)
+  ├─ per remote comment: DRAFT untouched / SYNCED refresh / MODIFIED+DELETED
+  │    conflict-detect / no local copy → adopt-or-insert
+  ├─ remote-deleted comments  (uses idx_comments_remote)
+  └─ remote-deleted threads   (orphaned drafts become a thread conflict)
 ```
 
 ---
@@ -601,20 +689,26 @@ sync_review() only on full success
 **Problems:** Partial failure leaves DB out of sync. No resume path. No
 reconcile on failure.
 
-### After (submit)
+### After (submit — as shipped)
 
 ```
-compute_change_set() → { additions, replies, updates, deletions }
-queue submit_work (uv.new_work thread):
-  loop: mark_in_flight → push → mark_synced(remote_id)
-        on failure: revert_in_flight, sync_review()
-  sync_review() always runs at end
-vim.schedule callback: replay notifications + show outcome
+build_ops() → outbox.enqueue()  [1 txn, dedupe by (c_id, op)]
+queue submit_review_thread (uv.new_work):
+  per category (create → reply → edit → delete → verdict):
+    mark_running → push → txn{ mark_done(remote_id) + comment transition }
+    on failure: mark_failed (or mark_queued for an atomic batch) → stop category
+  _fetch_remote_threads + _reconcile_threads   ← ALWAYS runs, even on partial failure
+  outbox.prune_done()
+completion (main thread): replay notifications → refresh UI → (ok, count, err, remaining)
 ```
 
-**Improvements:** Resumable/idempotent (change-set drops pushed items). Local DB
-reconciled even on failure. Retry skips already-pushed items. Clear user
-feedback on success/partial/failure. Runs on the thread (no UI block).
+**Improvements:** Idempotent by construction (`DONE` is terminal and `enqueue`
+dedupes), so a retry can never re-post what landed. Partial failure leaves the
+untouched ops `QUEUED` rather than in a state the pending mask excludes. Local DB
+reconciled even on failure. Crash recovery adopts landed-but-unrecorded ops by
+body match. Verdict is an op of its own, so it is never dropped. Reports
+"pushed N, M left" instead of aborting as if atomic. Runs on the thread (no UI
+block).
 
 ### Before (sync)
 
@@ -648,14 +742,19 @@ sync_review() → _sync_threads + _reconcile_remote_comment_deletions
 
 ### Cons
 
-- **New state** (`IN_FLIGHT`) — schema/state-machine change in `comments.lua`.
+- **New table** (`push_ops`) — a schema bump and one more thing to keep tidy
+  (GC and `prune_done` handle it, but it is real bookkeeping).
 - **Change-set abstraction** — a new typed structure + `compute_change_set()`
   to build and maintain.
 - **Refactor risk** — `sync_review` is the highest-risk function; needs good
   test coverage before/after.
-- **More code paths** — in-flight/reverting states add branches.
+- **Per-op round trips on non-atomic hubs** — GitLab gets one CLI call per note,
+  so a large batch is slower than GitHub's single review POST (the price of
+  knowing exactly which notes landed).
 - **Thread plumbing** — the submit path needs the `uv.new_work` wrapper + own
-  connection (doc 09 §7), plus notification replay.
+  connection (doc 09 §7), notification replay, and per-call callback slots.
+- **Verdict shape differs per hub** — expressed as three capability flags rather
+  than one boolean, which is more honest but more to document.
 
 ---
 
@@ -672,61 +771,83 @@ sync_review() → _sync_threads + _reconcile_remote_comment_deletions
 - **Cons:** Doesn't solve the resume problem — a retry could double-push items
   that succeeded but weren't reconciled. **Partial** — good first step.
 
-### Alt C — Recommended: change-set + IN_FLIGHT state + idempotent retry + reconcile
+### Alt C — Recommended: change-set + transient push state + idempotent retry + reconcile
 - **Pros:** Correct, resumable, safe retries (idempotency falls out of the state
   transitions). Clear feedback. Runs on the thread.
 - **Cons:** More state + a change-set abstraction. **Accepted.**
+- **Shipped variant:** the *transient push state* component was replaced. Putting
+  it on the comment (§2.6.1 as originally drawn) is what stranded drafts and
+  duplicated notes; the shipped design keeps the rest of Alt C and moves the
+  transient state into the `push_ops` table (§2.6.1b). Same guarantees, and the
+  comment's content state is never a lock.
 
 ---
 
-## 7. Open Questions
+## 7. Open Questions (resolved)
 
-1. Should `IN_FLIGHT` be a persisted state or an in-memory flag? (Persisted is
-   safer for crash recovery, but adds schema complexity.)
-2. How to handle a crash *during* a push (IN_FLIGHT left in DB)?
-3. Should the batch new-thread response return per-item `remote_id`s, or does
-   the adapter need to return them explicitly?
-4. Should the change-set be a **pure function** (`compute_change_set(mo_id)`)
-   or a **materialized table** (a `pending_changes` table the submit loop reads)?
-   (Pure function is simpler; a table enables richer queries but adds sync
-   complexity.)
-5. For partial-failure feedback, should the per-item errors be **aggregated into
-   one notification** or **one notification per failed item**? (Aggregated is
-   less noisy; per-item is more actionable.)
+1. **Persisted transient state or in-memory flag?** — Persisted, but in its own
+   table (`push_ops.status`), not on the comment. On the comment it collided with
+   the pending-push mask, which is how drafts got stranded.
+2. **Crash during a push?** — `outbox.recover_stale()` (called from
+   `init_session` / `init_session_async`) re-queues any `RUNNING` row and sets
+   `uncertain = 1`. The next reconcile adopts the comment by body match if the hub
+   already has it, so the answer is "adopt, don't re-send".
+3. **Per-item `remote_id`s from the new-thread batch?** — Not available. GitHub's
+   review POST returns the review, not comment ids, so the batch commits its ops
+   as `DONE` with no `remote_id` and the following reconcile re-imports the synced
+   rows. The per-note (GitLab) path likewise relies on reconcile. Idempotency does
+   not depend on having the ids, because `DONE` is terminal.
+4. **Pure function or materialized change-set?** — Pure function
+   (`compute_change_set(mo_id)`), *plus* the outbox rows. The change-set decides
+   what to queue; the outbox records what has been attempted. A materialized
+   pending-changes table would have duplicated the outbox.
+5. **Aggregated or per-item error feedback?** — First error of the run is reported
+   (`_submit_pushes` returns one `err`), with the count of ops still queued
+   (`remaining`), and each failed op stores its own error on its row so
+   `push_ops.error` is the per-item record when someone wants the detail.
 
 ---
 
-## 8. Implementation Status (rediscovered)
+## 8. Implementation Status (current)
 
 ### 8.1 Implemented (verified in source)
 
 | Piece | Location | Notes |
 |:--|:--|:--|
-| `IN_FLIGHT` state | `storage/comments.lua` | `mark_in_flight` / `revert_in_flight` |
-| `with_transaction` wrapper | `storage/init.lua` | `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK` |
-| `compute_change_set` | `review.lua` | Typed `{additions, replies, updates, deletions}` |
-| Batched reconcile | `review.lua` `sync_review` | Single query + in-memory `local_by_thread` index (doc 10 ~11x win) |
-| `mark_in_flight` in txn | `review.lua` | Bulk `mark_in_flight` wrapped in `with_transaction` (Plan 07 §2.7) |
+| Push-op outbox | `storage/outbox.lua` | `push_ops` table (schema v4): `enqueue` (dedupe by `(c_id, op)` + delete-supersedes-edit + payload refresh), `mark_running/done/failed/queued/uncertain`, `pending`, `recover_stale`, `uncertain_by_body`, `adopt`, `prune_done` |
+| `with_transaction` wrapper | `storage/init.lua` | `BEGIN` / `COMMIT` / `ROLLBACK`; used for enqueue and for each op's commit |
+| `compute_change_set` | `review.lua` | Typed `{additions, replies, updates, deletions}`; feeds `build_ops` |
+| `build_ops` / `reply_parent` | `review.lua` | Pure op-descriptor builder; resolves a threadable parent or reports why not |
+| Outbox-driven submit | `review.lua` `_submit_pushes` | Category order create → reply → edit → delete → verdict; per-op commit; returns `(pushed, err, remaining)` |
+| Batched reconcile + adoption | `review.lua` `_reconcile_threads` | Single query + in-memory index (doc 10 ~11x win), plus uncertain-op adoption by body match |
+| Submit on a thread | `review.lua` `submit_review_thread` | `uv.new_work` + own DB connection + notification replay |
+| Per-call callback slots | `thread.lua` `arm` / `dispatch_cb` | Singleton workers no longer replay the first caller's callback |
+| Verdict as an op | `adapter/github.lua`, `adapter/gitlab.lua` `submit_verdict` | Capability-gated; an unsupported verdict reports instead of dropping |
+| Crash recovery | `review.lua` `init_session` / `init_session_async` | `outbox.recover_stale()` on session start |
+| Conflict resolution surface | `ui/conflicts.lua`, `:LocalReviewConflicts` | The exit door the conflict-gate error message promises |
 
-### 8.2 Remaining work (in priority order)
+### 8.2 Follow-up work (not part of this plan)
 
-1. **Move `submit_review` to a thread** (doc 07 §2.5). Currently synchronous on
-   main thread — blocks UI during the push loop. Needs a `submit_review_thread`
-   entry (like `sync_review_thread`) + `pull_review_async`-style wrapper using
-   `thread.create_worker`. **Depends on** #2 (decomposition) so the pure core is
-   separable from `vim.notify`.
-2. **Decompose `sync_review` monolith** (doc 07 §2.2) into
-   `_sync_threads` / `_reconcile_remote_comment_deletions` /
-   `_reconcile_remote_thread_deletions`. Improves testability + enables #1.
-3. **`IN_FLIGHT` crash recovery on startup.** No code reverts orphaned
-   `IN_FLIGHT` states left by a crash mid-push (doc 07 §2.6.1 invariant: "must
-   never persist across a crash"). Add a startup pass that reverts any
-   `IN_FLIGHT` item to its prior state.
+1. **Multi-line comment fidelity.** `build_ops` snapshots `end_line`, but neither
+   adapter sends a range yet — ranged drafts collapse to a single line on both hubs.
+2. **Head-sha pre-flight.** Drafts written against an older `head_sha` are pushed
+   as-is; GitHub rejects comments on lines outside the current diff (422), which
+   surfaces as a failed create group rather than a "changes landed since you
+   started reviewing" warning.
+3. **Further `sync_review` decomposition.** `_fetch_remote_threads` +
+   `_reconcile_threads` split the original monolith; the reconcile body is still
+   one long function and could be split per phase (threads / comments / deletions).
 
 ### 8.3 Verification checklist
 
-- [ ] `submit_review` runs on a thread (UI stays responsive during push)
-- [ ] `sync_review` decomposed into `_sync_threads` + `_reconcile_*`
-- [ ] `IN_FLIGHT` items reverted on startup (crash recovery)
-- [ ] Partial failure still reconciles + shows per-item feedback
-- [ ] Retry is idempotent (pushed items drop out of change-set)
+Covered by `tests/test_submit_contract.lua`, which intercepts the CLI layer
+(`adapter.base.executor_override`) so it can assert endpoints and arguments and
+script partial failures without touching the network.
+
+- [x] `submit_review` runs on a thread (UI stays responsive during push)
+- [x] `sync_review` decomposed into `_fetch_remote_threads` + `_reconcile_threads`
+- [x] Interrupted ops recovered and adopted, not re-sent (`recover_stale` + adoption)
+- [x] Partial failure still reconciles + reports `pushed N / M queued`
+- [x] Retry is idempotent (`DONE` terminal + `(c_id, op)` dedupe; GitLab re-post case)
+- [x] Verdict never dropped and never duplicated (rides the batch only when the hub can)
+- [x] Edit/delete use correct adapter arity, including local-only deletes

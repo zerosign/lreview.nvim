@@ -11,13 +11,16 @@ networking and sync operations to isolated libuv background worker threads.
 Main Features:
 - Asynchronous worker threads (`uv.new_work`) with MessagePack serialization.
 - Centralized debounced Sync Bus (~80ms coalescing) and in-memory diff cache.
-- Idempotent submit state machine with `IN_FLIGHT` transient states and atomic
-  SQLite transactions.
+- Idempotent submit driven by a `push_ops` outbox: every mutation is one row,
+  committed the moment its call succeeds, so retries never double-post.
 - Adapter capability system for safe multiplatform feature queries.
 - Repo topology-aware materialization (`checkout` vs `worktree`).
 - Summary panel with dual view modes (Threads & Files table) and verdict
   short-circuits (`A` to approve, `R` to reject).
 - Floating verdict confirmation popup window.
+- Conflict detection with `:LocalReviewConflicts` to keep or accept each side.
+- Offline issue tracker cache with FTS5 search, so an MR's linked issues can be
+  read without a network round trip.
 
 ==============================================================================
 INSTALLATION                                          *lreview-installation*
@@ -109,6 +112,18 @@ Inside the `defaults` block of your configuration:
                       Height of floating thread panel (percentage of window).
                       Default: `0.6` (60%)
 
+  `issues.per_page`   (number)
+                      Hub page size for the sequential issue pull.
+                      Default: `50`
+
+  `issues.max_pages`  (number)
+                      Hard stop on the paging driver, so a huge tracker cannot
+                      run away. Default: `20`
+
+  `issues.stale_after_min` (number)
+                      Age past which `:LocalReviewIssues` refreshes the cache
+                      before opening. Default: `30`
+
   `open.method`       (string)
                       Action to execute when starting a review branch.
                       Default: `"checkout"`
@@ -184,6 +199,38 @@ USER COMMANDS                                             *lreview-commands*
 `:LocalReviewPrev`
                       Jumps to the previous discussion thread in the active buffer.
 
+`:LocalReviewConflicts`
+                      Lists the comments blocking submit, showing your version
+                      against the remote's. `k` keeps yours (re-queued for the
+                      next submit), `a` accepts theirs, `q` closes.
+
+`:LocalReviewRequestReview`
+                      Requests a review from a cached repo user, fetching the
+                      user list first when nothing is cached.
+
+`:LocalReviewPullUser`
+                      Caches the repository user list for reviewer autocomplete.
+
+`:LocalReviewPullRequest`
+                      Caches the open MR/PR list for link autocomplete.
+
+`:LocalReviewIssuePull` [<state>]
+                      Pulls the issue list page by page on a worker thread,
+                      reporting progress and writing each page as it arrives.
+                      <state> is `open` (default), `closed`, or `all`.
+
+`:LocalReviewIssues` [<state>]
+                      Picks a locally cached issue and shows its description and
+                      discussion. Refreshes the cache first when it is empty or
+                      older than `issues.stale_after_min`. The picker goes
+                      through `vim.ui.select`, so telescope / fzf-lua /
+                      snacks.picker render it in your config.
+
+`:LocalReviewIssue` <number>
+                      Shows one issue by number, fetching it from the hub only
+                      when it is not already cached. Press `S` in the buffer to
+                      re-sync that single issue.
+
 ==============================================================================
 SUMMARY PANEL KEYBINDINGS                               *lreview-summary-panel*
 
@@ -230,7 +277,20 @@ Each platform adapter declares its feature capabilities in a `capabilities` tabl
   `list_templates`   (boolean) MR template listing support.
   `inline_comments`  (boolean) Line-level inline comment support.
   `resolve_threads`  (boolean) Thread resolution support.
-  `batch_submit`     (boolean) Batch inline review submission support.
+  `batch_submit`     (boolean) Several inline comments in ONE call.
+  `atomic_inline_batch` (boolean) That call is all-or-nothing, so nothing can
+                       partially land. Drives how lreview commits new threads.
+  `verdict_in_review_batch` (boolean) The review event may ride along with that
+                       call; otherwise the verdict is its own `submit_verdict`.
+  `assign_reviewers` (boolean) Reviewer assignment support.
+  `issues`           (boolean) The hub exposes an issue tracker to cache.
+  `offline_staging`  (boolean) Draft-then-batch workflow supported.
+
+`atomic_inline_batch`, `verdict_in_review_batch` and `issues` default to false, so
+a custom adapter is never assumed to support an atomic batch, an in-batch verdict,
+or an issue tracker. (`batch_submit` defaults true for v3 compatibility, but the
+engine drives nothing off it today.) See |lreview-verdict-shape| for how the
+submit-shape flags change the calls lreview makes.
 
 Query capability support via:
 >lua
@@ -249,6 +309,16 @@ threads via `lreview.thread`:
   `vim.mpack.encode` and `vim.mpack.decode`.
 - **Fast Event Escapes:** All thread completion callbacks run inside libuv fast
   event context and are wrapped in `vim.schedule` before invoking Neovim API calls.
+- **Per-Call Callback Slots:** Workers are module-level singletons, so their
+  completion closure is created once and must not capture a caller's callback
+  (it would then replay the FIRST call's callback forever). Callers arm a
+  callback with `thread.arm(key, cb)` before queueing, and the completion pulls
+  it with `thread.dispatch_cb(key, ...)` — FIFO, matching libuv's job order.
+- **Results Echo Their Inputs:** A worker result carries back the arguments it
+  acted on (e.g. `cwd`, `thread_id`, `title`), so a completion never reads a
+  stale captured value or acts on the wrong session.
+- **Notifications Survive the Boundary:** `vim.notify` is unavailable on worker
+  threads, so notifications are accumulated and replayed on the main thread.
 
 ==============================================================================
 CENTRALIZED SYNC BUS & DIFF CACHE                       *lreview-sync-bus*
@@ -262,19 +332,90 @@ by `lreview.sync`:
   results per file, rendering gutter decorations in `0.029 ms` per pass (**78.6x faster**).
 
 ==============================================================================
-SUBMIT STATE MACHINE & ATOMICITY                     *lreview-submit-atomicity*
+SUBMIT OUTBOX & ATOMICITY                          *lreview-submit-atomicity*
 
-Pending review changes transition through a state machine:
+A comment's state column describes only its CONTENT relative to the hub:
 - `DRAFT` (1): Unpushed local comment.
-- `SYNCED` (2): Confirmed on remote forge host.
-- `IN_FLIGHT` (4): Transient state while transmitting over network thread.
+- `SYNCED` (2): Confirmed on the remote forge host.
 - `MODIFIED` (8): Locally edited after remote sync.
-- `DELETED` (16): Locally soft-deleted pending remote deletion.
-- `CONFLICT` (32): Remote collision detected.
+- `DELETED` (16): Locally soft-deleted, pending remote deletion.
+- `CONFLICT` (32): Remote collision detected; blocks submit until resolved.
+(Bit 4 is reserved. v3 used it for an `IN_FLIGHT` push lock, which stranded
+drafts: the pending-push mask excluded that bit, so an interrupted submit left
+comments that were neither pushed nor pushable until a restart.)
 
-Transactions use `storage.with_transaction(fn)` to wrap state updates in explicit
-SQLite `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK` blocks, guaranteeing zero local
-corruption on network failures.
+Whether a mutation has been SENT is tracked separately, as one row per mutation
+in the `push_ops` outbox (lua/lreview/storage/outbox.lua):
+
+    QUEUED -> RUNNING -> DONE | FAILED
+    FAILED -> RUNNING                       (retry: same row, refreshed payload)
+    RUNNING -> QUEUED + uncertain = 1       (crash recovery)
+
+Guarantees:
+- Each success is committed as DONE together with the comment's own transition
+  in one `storage.with_transaction(fn)` block, so a later failure in the same
+  batch can never re-send a note that already landed.
+- `outbox.enqueue` dedupes by (c_id, op): re-running submit never queues the
+  same mutation twice. A queued op whose body was edited refreshes its payload
+  snapshot rather than adding a second row.
+- A failure marks that op FAILED and stops its category, leaving untouched ops
+  QUEUED. Nothing is stranded, and `:LocalReviewSubmit` reports the count still
+  queued so the user knows to run it again.
+- An op interrupted mid-call has an unknown outcome; `outbox.recover_stale()`
+  re-queues it flagged `uncertain` and the next reconcile adopts the comment by
+  body match instead of posting a duplicate.
+
+Category order is create_thread, reply, edit, delete, verdict — so replies always
+land after the thread they belong to, and the verdict last of all.
+
+==============================================================================
+PUSH OPS, VERDICTS & HUB DIFFERENCES                   *lreview-verdict-shape*
+
+Platforms differ in how a verdict can be delivered, and the adapter declares it
+instead of the engine guessing (see `adapter.supports`):
+
+                                          GitHub    GitLab
+`batch_submit`                            true      false
+`atomic_inline_batch`                     true      false
+`verdict_in_review_batch`                 true      false
+
+- GitHub: `POST /pulls/{n}/reviews` creates every inline comment AND sets the
+  event in one all-or-nothing call, so the verdict rides along when there are
+  new threads, and nothing lands when the call fails.
+- GitLab: `glab mr note create` is one note per call. lreview drives that loop
+  itself and commits each note as it succeeds, which is what stops a mid-loop
+  failure from re-posting notes that already landed. The verdict is a separate
+  `glab mr approve` call.
+- A verdict chosen with no new threads to attach it to becomes its own op on
+  both platforms, so "approve" is never silently dropped.
+- `REQUEST_CHANGES` has no glab equivalent. It is reported as a failed op with
+  that reason rather than faked with a note or swallowed.
+
+==============================================================================
+ISSUE TRACKER CACHE                                           *lreview-issues*
+
+The hub's issue list is cached locally (schema tables `issues` + `issue_notes`,
+with an FTS5 trigram index) so the reviewer can read what an MR is actually
+about without another round trip.
+
+- `:LocalReviewIssuePull [open|closed|all]` fetches page by page on a worker
+  thread, writing each page as it arrives and reporting progress. Pages are
+  sequential because progress is only meaningful in order, and a short page is
+  the end-of-list signal. `defaults.issues` sets `per_page`, `max_pages`, and
+  `stale_after_min`.
+- `:LocalReviewIssues [state]` reads the cache (refreshing first when it is
+  empty or older than `stale_after_min`) and picks through `vim.ui.select`, so
+  telescope, fzf-lua, and snacks.picker render it from the user's own config.
+- `:LocalReviewIssue {n}` shows one issue by number, fetching it only when
+  uncached. Press `S` in the buffer to re-sync that single issue.
+- `require("lreview").api.issue_views.referenced(text)` resolves `#123` / `!45`
+  / `owner/repo#7` / issues URL references against the cache and returns only
+  what is already stored — correlation costs no network.
+- GitHub's `/issues` endpoint also returns pull requests; the mapper drops them
+  so they are never double-listed against their own MR cache row.
+- Closed issues past the keep window are purged by the same garbage collection
+  that protects local drafts.
+
 
 ==============================================================================
 DATABASE ENGINE & CONCURRENCY                         *lreview-database-engine*
