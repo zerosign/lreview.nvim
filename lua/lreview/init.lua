@@ -7,6 +7,7 @@ local review = require("lreview.review")
 local adapter = require("lreview.adapter")
 local storage = require("lreview.storage")
 local git = require("lreview.git")
+local materialize = require("lreview.materialize")
 
 local M = {}
 
@@ -268,12 +269,19 @@ end
 local function cmd_submit()
   ensure_review_started(function(ok)
     if not ok then return end
-    review.submit_review(nil, function(success, count, err)
+    review.submit_review(nil, function(success, count, err, remaining)
       if err then
         vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-        return
       end
-      vim.notify("lreview: submitted " .. count .. " inline comment(s)", vim.log.levels.INFO)
+      if count and count > 0 then
+        vim.notify("lreview: submitted " .. count .. " inline comment(s)", vim.log.levels.INFO)
+      elseif not err then
+        vim.notify("lreview: nothing to submit", vim.log.levels.INFO)
+      end
+      if remaining and remaining > 0 then
+        vim.notify("lreview: " .. remaining .. " change(s) still queued (:LocalReviewSubmit retries them)",
+          vim.log.levels.WARN)
+      end
     end)
   end)
 end
@@ -435,6 +443,38 @@ local function cmd_branch(args)
   end
 end
 
+--- Resolve conflicts that are blocking submit (the door the error message
+--- points at). Conflicts wedge submit until they are answered, so this is a
+--- first-class command rather than something buried in the summary panel.
+local function cmd_conflicts()
+  require("lreview.ui.conflicts").open()
+end
+
+--- Pick an issue from the local cache (pulling first when empty or stale).
+--- The picker goes through vim.ui.select, so telescope/fzf-lua/snacks render it.
+local function cmd_issues(args)
+  local state = args.args ~= "" and args.args or "open"
+  require("lreview.ui.issues").pick({ state = state })
+end
+
+--- Show one issue by number; pulls it from the hub when not cached.
+local function cmd_issue(args)
+  if args.args == "" then
+    vim.notify("lreview: usage :LocalReviewIssue <number>", vim.log.levels.WARN)
+    return
+  end
+  require("lreview.ui.issues").show(args.args)
+end
+
+--- Pull the issue list sequentially (page by page, non-blocking) into the cache.
+local function cmd_issue_pull(args)
+  local state = args.args ~= "" and args.args or "open"
+  local ok, err = require("lreview.issues").pull_async({ state = state })
+  if not ok then
+    vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+  end
+end
+
 local function cmd_start()
   local cwd = vim.fn.getcwd()
   vim.notify("lreview: resolving MR for review...", vim.log.levels.INFO)
@@ -486,6 +526,16 @@ function M.register_commands()
   api.nvim_create_user_command("LocalReviewSummary", cmd_summary, {})
   api.nvim_create_user_command("LocalReviewNext", cmd_next, {})
   api.nvim_create_user_command("LocalReviewPrev", cmd_prev, {})
+  api.nvim_create_user_command("LocalReviewConflicts", cmd_conflicts, {})
+  api.nvim_create_user_command("LocalReviewIssues", cmd_issues, {
+    nargs = "?",
+    complete = function() return { "open", "closed", "all" } end,
+  })
+  api.nvim_create_user_command("LocalReviewIssue", cmd_issue, { nargs = "?" })
+  api.nvim_create_user_command("LocalReviewIssuePull", cmd_issue_pull, {
+    nargs = "?",
+    complete = function() return { "open", "closed", "all" } end,
+  })
 end
 
 --- Public API surface.
@@ -516,6 +566,10 @@ M.api = {
   fetch_users = require("lreview.users").fetch_users,
   pull_request = require("lreview.pull_request"),
   fetch_pull_requests = require("lreview.pull_request").fetch,
+  issues = require("lreview.issues"),
+  issue_views = require("lreview.ui.issues"),
+  conflicts = require("lreview.ui.conflicts"),
+  outbox = require("lreview.storage.outbox"),
   next_thread = require("lreview.ui.decor").next_thread,
   prev_thread = require("lreview.ui.decor").prev_thread,
 }

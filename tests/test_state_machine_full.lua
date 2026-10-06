@@ -1,12 +1,14 @@
 -- Comprehensive state machine unit tests for lreview.nvim.
 --
 -- Covers ALL comment state transitions, thread state transitions, conflict
--- resolution, crash recovery (IN_FLIGHT), change-set computation, and the
--- async submit contract. This is the authoritative test for the state model
--- described in docs/design/07-submit-atomicity.md.
+-- resolution, push-outbox lifecycle and crash recovery, change-set computation,
+-- and the async submit contract. This is the authoritative test for the state
+-- model described in docs/design/07-submit-atomicity.md.
 --
--- Comment states (bit flags):
---   DRAFT=1, SYNCED=2, IN_FLIGHT=4, MODIFIED=8, DELETED=16, CONFLICT=32
+-- Comment states (bit flags) describe CONTENT only:
+--   DRAFT=1, SYNCED=2, MODIFIED=8, DELETED=16, CONFLICT=32
+--   (bit 4 is reserved: v3 used it for IN_FLIGHT, the push lock now lives in
+--    the `push_ops` outbox so an interrupted submit cannot strand a comment)
 -- Thread states (bit flags):
 --   DRAFT=1, SYNCED=2, RESOLVED=4, DELETED=8, CONFLICT=16
 
@@ -17,6 +19,7 @@ package.path = package.path .. ";" .. project_root .. "/data/nvim/lazy/sqlite.lu
 local storage = require("lreview.storage")
 local pull_request = require("lreview.storage.pull_request")
 local comments = require("lreview.storage.comments")
+local outbox = require("lreview.storage.outbox")
 local review = require("lreview.review")
 local init = require("lreview")
 
@@ -24,6 +27,8 @@ print("TEST: Starting Comprehensive State Machine Unit Tests...")
 
 local test_db = "tmp/test_state_machine_full.db"
 vim.fn.delete(test_db)
+vim.fn.delete(test_db .. "-wal")
+vim.fn.delete(test_db .. "-shm")
 
 init.setup({
   defaults = { db_path = test_db }
@@ -97,7 +102,7 @@ end
 print("== 1. State constants & predicates ==")
 check(S.DRAFT == 1, "DRAFT should be 1")
 check(S.SYNCED == 2, "SYNCED should be 2")
-check(S.IN_FLIGHT == 4, "IN_FLIGHT should be 4")
+check(S.IN_FLIGHT == nil, "IN_FLIGHT removed: the push lock lives in push_ops")
 check(S.MODIFIED == 8, "MODIFIED should be 8")
 check(S.DELETED == 16, "DELETED should be 16")
 check(S.CONFLICT == 32, "CONFLICT should be 32")
@@ -111,18 +116,19 @@ check(TS.CONFLICT == 16, "THREAD CONFLICT should be 16")
 check(comments.is_draft(S.DRAFT), "is_draft(DRAFT)")
 check(not comments.is_draft(S.SYNCED), "not is_draft(SYNCED)")
 check(comments.is_synced(S.SYNCED), "is_synced(SYNCED)")
-check(comments.is_in_flight(S.IN_FLIGHT), "is_in_flight(IN_FLIGHT)")
 check(comments.is_modified(S.MODIFIED), "is_modified(MODIFIED)")
 check(comments.is_deleted(S.DELETED), "is_deleted(DELETED)")
 check(comments.is_conflict(S.CONFLICT), "is_conflict(CONFLICT)")
 
--- needs_push mask: DRAFT, MODIFIED, DELETED need push; SYNCED, IN_FLIGHT, CONFLICT don't
+-- needs_push mask: DRAFT, MODIFIED, DELETED need push; SYNCED and CONFLICT don't.
 check(comments.needs_push(S.DRAFT), "needs_push(DRAFT)")
 check(comments.needs_push(S.MODIFIED), "needs_push(MODIFIED)")
 check(comments.needs_push(S.DELETED), "needs_push(DELETED)")
 check(not comments.needs_push(S.SYNCED), "not needs_push(SYNCED)")
-check(not comments.needs_push(S.IN_FLIGHT), "not needs_push(IN_FLIGHT)")
 check(not comments.needs_push(S.CONFLICT), "not needs_push(CONFLICT)")
+-- Bit 4 is the retired IN_FLIGHT lock: nothing may claim it needs a push, or a
+-- stranded v3 row would resurrect as a duplicate post.
+check(not comments.needs_push(4), "not needs_push(reserved bit 4)")
 
 -- Thread predicates
 check(comments.thread_is_draft(TS.DRAFT), "thread_is_draft(DRAFT)")
@@ -137,44 +143,102 @@ check(comments.thread_is_synced(6) and comments.thread_is_resolved(6), "thread S
 -- ===========================================================================
 print("== 2. Comment state transitions ==")
 
--- 2a. DRAFT -> IN_FLIGHT -> REVERT (to DRAFT)
+-- 2a. Outbox lifecycle: QUEUED -> RUNNING -> FAILED (retryable, never stranded)
 make_thread("t_2a")
 make_comment("c_2a", "t_2a", S.DRAFT)
-comments.mark_in_flight("c_2a")
-check(get_state("c_2a").state == S.IN_FLIGHT, "mark_in_flight: DRAFT -> IN_FLIGHT")
-check(get_state("c_2a").prev_state == S.DRAFT, "mark_in_flight: prev_state persisted as DRAFT")
-comments.revert_in_flight("c_2a", S.DRAFT)
-check(get_state("c_2a").state == S.DRAFT, "revert_in_flight: IN_FLIGHT -> DRAFT")
-check(get_state("c_2a").prev_state == nil, "revert_in_flight: prev_state cleared")
+local op2a = outbox.enqueue({ {
+  mo_id = mo_id, t_id = "t_2a", c_id = "c_2a", op = outbox.OP.CREATE_THREAD,
+  payload = { path = "src/test.lua", line = 5, body = "draft body" },
+} })
+check(op2a == 1, "enqueue: one op queued")
+local p2a = outbox.pending(mo_id)
+local found2a
+for _, op in ipairs(p2a) do if op.c_id == "c_2a" then found2a = op end end
+check(found2a and found2a.status == outbox.STATUS.QUEUED, "enqueue: status QUEUED")
+outbox.mark_running(found2a.op_id)
+check(outbox.count_pending(mo_id) >= 1, "mark_running: still pending (RUNNING is non-terminal)")
+outbox.mark_failed(found2a.op_id, "boom")
+check(outbox.count_failed(mo_id) >= 1, "mark_failed: counted as failed")
+-- The comment itself never changes state: it is still DRAFT and still pushable,
+-- which is the whole point of moving the lock out of comments.state.
+check(get_state("c_2a").state == S.DRAFT, "outbox lock leaves comments.state untouched")
+check(comments.needs_push(get_state("c_2a").state), "failed op's comment still needs_push")
 
--- 2b. MODIFIED -> IN_FLIGHT -> REVERT (to MODIFIED) — exercises prev_state persistence
-make_thread("t_2b")
-make_comment("c_2b", "t_2b", S.MODIFIED)
-comments.mark_in_flight("c_2b")
-check(get_state("c_2b").state == S.IN_FLIGHT, "mark_in_flight: MODIFIED -> IN_FLIGHT")
-check(get_state("c_2b").prev_state == S.MODIFIED, "mark_in_flight: prev_state persisted as MODIFIED")
-comments.revert_in_flight("c_2b", S.MODIFIED)
-check(get_state("c_2b").state == S.MODIFIED, "revert_in_flight: IN_FLIGHT -> MODIFIED (uses prev_state)")
+-- 2b. Idempotent enqueue: the same (c_id, op) is never queued twice, but a
+-- changed body refreshes the queued snapshot instead of duplicating the post.
+local again = outbox.enqueue({ {
+  mo_id = mo_id, t_id = "t_2a", c_id = "c_2a", op = outbox.OP.CREATE_THREAD,
+  payload = { path = "src/test.lua", line = 5, body = "draft body" },
+} })
+check(again == 0, "enqueue: identical pending op is deduped")
+local refreshed = outbox.enqueue({ {
+  mo_id = mo_id, t_id = "t_2a", c_id = "c_2a", op = outbox.OP.CREATE_THREAD,
+  payload = { path = "src/test.lua", line = 5, body = "edited while queued" },
+} })
+check(refreshed == 1, "enqueue: changed body re-queues with the new payload")
+local snap
+for _, op in ipairs(outbox.pending(mo_id)) do
+  if op.c_id == "c_2a" then snap = op end
+end
+check(snap and snap.body == "edited while queued", "enqueue: payload snapshot is current")
+check(snap and snap.status == outbox.STATUS.QUEUED, "enqueue: refreshed op reset to QUEUED")
 
--- 2c. DELETED -> IN_FLIGHT -> REVERT (to DELETED)
+-- 2c. A DELETED comment that goes through a push attempt keeps its DELETED
+-- state. This is the invariant v3 expressed as "revert_in_flight restores
+-- prev_state"; with the lock in push_ops it is simply that the comment's own
+-- state is never used as a push lock.
 make_thread("t_2c")
 make_comment("c_2c", "t_2c", S.DELETED)
-comments.mark_in_flight("c_2c")
-check(get_state("c_2c").prev_state == S.DELETED, "mark_in_flight: prev_state persisted as DELETED")
-comments.revert_in_flight("c_2c", S.DELETED)
-check(get_state("c_2c").state == S.DELETED, "revert_in_flight: IN_FLIGHT -> DELETED")
+outbox.enqueue({ {
+  mo_id = mo_id, t_id = "t_2c", c_id = "c_2c", op = outbox.OP.DELETE,
+  payload = { remote_id = "r-2c", body = "gone" },
+} })
+local op2c
+for _, op in ipairs(outbox.pending(mo_id)) do
+  if op.c_id == "c_2c" then op2c = op end
+end
+outbox.mark_running(op2c.op_id)
+check(get_state("c_2c").state == S.DELETED, "RUNNING op does not mutate comments.state")
+outbox.mark_failed(op2c.op_id, "network down")
+check(get_state("c_2c").state == S.DELETED, "FAILED op leaves comments.state DELETED")
+check(comments.needs_push(get_state("c_2c").state), "failed delete still needs_push")
 
--- 2d. revert_in_flight with NO prev_state and NO fallback -> DRAFT
-make_thread("t_2d")
-make_comment("c_2d", "t_2d", S.IN_FLIGHT)  -- directly create IN_FLIGHT (no prev_state)
-comments.revert_in_flight("c_2d")
-check(get_state("c_2d").state == S.DRAFT, "revert_in_flight: no prev_state, no fallback -> DRAFT")
+-- 2d. A FAILED op is retryable and dedupes: re-enqueueing the same pending
+-- mutation refreshes the one row instead of adding a second attempt.
+local retry = outbox.enqueue({ {
+  mo_id = mo_id, t_id = "t_2c", c_id = "c_2c", op = outbox.OP.DELETE,
+  payload = { remote_id = "r-2c", body = "gone" },
+} })
+check(retry == 0, "re-enqueue of an open op does not duplicate it")
+local retry2 = outbox.enqueue({ {
+  mo_id = mo_id, t_id = "t_2c", c_id = "c_2c", op = outbox.OP.DELETE,
+  payload = { remote_id = "r-2c", body = "edited again" },
+} })
+check(retry2 == 1, "changed body re-arms the failed op for retry")
 
--- 2e. revert_in_flight with NO prev_state but WITH fallback
+-- 2e. A queued delete cancels other open ops on the same comment: sending the
+-- edit for a note we are about to remove would be wasted work at best.
 make_thread("t_2e")
-make_comment("c_2e", "t_2e", S.IN_FLIGHT)
-comments.revert_in_flight("c_2e", S.MODIFIED)
-check(get_state("c_2e").state == S.MODIFIED, "revert_in_flight: no prev_state, with fallback -> MODIFIED")
+make_comment("c_2e", "t_2e", S.MODIFIED)
+outbox.enqueue({ {
+  mo_id = mo_id, t_id = "t_2e", c_id = "c_2e", op = outbox.OP.EDIT,
+  payload = { remote_id = "r-2e", body = "edit first" },
+} })
+local before_delete = 0
+for _, op in ipairs(outbox.pending(mo_id)) do
+  if op.c_id == "c_2e" then before_delete = before_delete + 1 end
+end
+check(before_delete == 1, "edit op queued for c_2e")
+outbox.enqueue({ {
+  mo_id = mo_id, t_id = "t_2e", c_id = "c_2e", op = outbox.OP.DELETE,
+  payload = { remote_id = "r-2e", body = "" },
+} })
+local open_for_2e = {}
+for _, op in ipairs(outbox.pending(mo_id)) do
+  if op.c_id == "c_2e" then open_for_2e[#open_for_2e + 1] = op.op end
+end
+check(#open_for_2e == 1 and open_for_2e[1] == outbox.OP.DELETE,
+  "queued delete supersedes the open edit op for the same comment")
 
 -- 2f. mark_comment_synced: DRAFT -> SYNCED with remote_id
 make_thread("t_2f")
@@ -318,41 +382,50 @@ comments.delete_thread("t_4g")
 check(comments.get_thread("t_4g") == nil, "delete_thread: row removed")
 
 -- ===========================================================================
--- 5. CRASH RECOVERY (IN_FLIGHT) — item 4
+-- 5. CRASH RECOVERY (outbox) — item 4
 -- ===========================================================================
-print("== 5. Crash recovery (IN_FLIGHT) ==")
+print("== 5. Crash recovery (push outbox) ==")
 
--- 5a. recover_in_flight reverts DRAFT-origin to DRAFT
-make_thread("t_5a")
-make_comment("c_5a", "t_5a", S.DRAFT)
-comments.mark_in_flight("c_5a")
-local n1 = comments.recover_in_flight()
-check(n1 >= 1, "recover_in_flight: found IN_FLIGHT comments")
-check(get_state("c_5a").state == S.DRAFT, "recover_in_flight: DRAFT-origin -> DRAFT")
+-- 5a. An interrupted submit leaves its op RUNNING; recovery re-queues it and
+-- flags the outcome as uncertain instead of declaring it unsent.
+make_thread("t_5a", { is_draft = true })
+make_comment("c_5a", "t_5a", S.DRAFT, "uncertain body")
+outbox.enqueue({ {
+  mo_id = mo_id, t_id = "t_5a", c_id = "c_5a", op = outbox.OP.CREATE_THREAD,
+  payload = { path = "src/test.lua", line = 5, body = "uncertain body" },
+} })
+local op5a
+for _, op in ipairs(outbox.pending(mo_id)) do
+  if op.c_id == "c_5a" then op5a = op end
+end
+outbox.mark_running(op5a.op_id)
+local recovered = outbox.recover_stale()
+check(recovered >= 1, "recover_stale: found the interrupted op")
+local after
+for _, op in ipairs(outbox.pending(mo_id)) do
+  if op.c_id == "c_5a" then after = op end
+end
+check(after and after.status == outbox.STATUS.QUEUED, "recover_stale: RUNNING -> QUEUED")
+check(after and after.uncertain == true, "recover_stale: outcome flagged uncertain")
 
--- 5b. recover_in_flight reverts MODIFIED-origin to MODIFIED (prev_state persistence)
-make_thread("t_5b")
-make_comment("c_5b", "t_5b", S.MODIFIED)
-comments.mark_in_flight("c_5b")
-comments.recover_in_flight()
-check(get_state("c_5b").state == S.MODIFIED, "recover_in_flight: MODIFIED-origin -> MODIFIED")
+-- 5b. uncertain_by_body indexes exactly the ops reconcile may adopt.
+local by_body = outbox.uncertain_by_body(mo_id)
+check(by_body["uncertain body"] ~= nil, "uncertain_by_body: indexes the crashed op's body")
+check(by_body["no such body"] == nil, "uncertain_by_body: unrelated body absent")
 
--- 5c. recover_in_flight reverts DELETED-origin to DELETED
-make_thread("t_5c")
-make_comment("c_5c", "t_5c", S.DELETED)
-comments.mark_in_flight("c_5c")
-comments.recover_in_flight()
-check(get_state("c_5c").state == S.DELETED, "recover_in_flight: DELETED-origin -> DELETED")
+-- 5c. Adoption consumes the op so the draft is never posted a second time.
+outbox.adopt(after.op_id, "9991")
+local still_pending = 0
+for _, op in ipairs(outbox.pending(mo_id)) do
+  if op.c_id == "c_5a" then still_pending = still_pending + 1 end
+end
+check(still_pending == 0, "adopt: op becomes terminal (no duplicate post possible)")
 
--- 5d. recover_in_flight with no prev_state -> DRAFT
-make_thread("t_5d")
-make_comment("c_5d", "t_5d", S.IN_FLIGHT)  -- directly IN_FLIGHT, no prev_state
-comments.recover_in_flight()
-check(get_state("c_5d").state == S.DRAFT, "recover_in_flight: no prev_state -> DRAFT")
+-- 5d. recover_stale is idempotent.
+check(outbox.recover_stale() == 0, "recover_stale: idempotent (nothing RUNNING left)")
 
--- 5e. recover_in_flight is idempotent (no IN_FLIGHT left after recovery)
-local n2 = comments.recover_in_flight()
-check(n2 == 0, "recover_in_flight: idempotent (0 remaining)")
+-- 5e. A DONE op is terminal and never re-appears in pending().
+check(outbox.count_pending(mo_id) >= 0, "pending excludes DONE rows")
 
 -- ===========================================================================
 -- 6. CHANGE-SET COMPUTATION (compute_change_set)
@@ -438,6 +511,15 @@ check(get_state("c_tx_fail") == nil, "with_transaction: insert rolled back")
 print("== 9. Async submit contract ==")
 vim.g.lreview_test_mode = true
 
+-- Hermetic guard: the unit tier must never spawn an authenticated gh/glab
+-- subprocess. Any CLI call reaching this override is a bug in the test tier.
+local base_cli = require("lreview.adapter.base")
+local cli_calls = 0
+base_cli.executor_override = function(argv)
+  cli_calls = cli_calls + 1
+  return { stdout = "", stderr = "unit tests must not call the hub CLI", code = 1 }
+end
+
 -- 9a. No active review -> callback(false, 0, err)
 local cb_ok, cb_count, cb_err = nil, nil, nil
 local called = false
@@ -477,8 +559,12 @@ check(called3, "submit_review: callback invoked with valid cwd")
 -- ===========================================================================
 -- 10. CLEANUP
 -- ===========================================================================
+check(cli_calls == 0, "unit tier never reached the hub CLI (" .. cli_calls .. " calls)")
+base_cli.executor_override = nil
 storage.close()
 vim.fn.delete(test_db)
+vim.fn.delete(test_db .. "-wal")
+vim.fn.delete(test_db .. "-shm")
 
 print("")
 print(string.format("== RESULTS: %d passed, %d failed ==", pass, fail))

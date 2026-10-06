@@ -18,6 +18,7 @@ local adapter = require("lreview.adapter")
 local storage = require("lreview.storage")
 local pull_request = require("lreview.storage.pull_request")
 local comments = require("lreview.storage.comments")
+local outbox = require("lreview.storage.outbox")
 
 local M = {}
 
@@ -70,10 +71,14 @@ local function uuid()
   -- variant/version bits
   t[13] = "4"
   t[17] = string.format("%x", math.floor(math.random(8, 11)))
- 
-  return table.concat(t, "", 1, 8) .. "-" .. table.concat(t, "", 9, 12)
-      .. "-" .. table.concat(t, "", 13, 16) .. "-" .. table.concat(t, "", 17, 20)
-      .. "-" .. table.concat(t, "", 21, 32)
+
+  -- Time-prefixed: an unseeded LuaJIT math.random replays the same order every
+  -- start, and add_comment uses INSERT OR REPLACE, so a repeated id would
+  -- silently overwrite an existing draft rather than fail loudly.
+  local stamp = string.format("%08x", os.time() % 0x100000000)
+  return stamp .. "-" .. table.concat(t, "", 2, 5)
+      .. "-" .. table.concat(t, "", 6, 9) .. "-" .. table.concat(t, "", 10, 13)
+      .. "-" .. table.concat(t, "", 14, 32)
 end
 
 --- Resolve the current MR for a directory (by branch, or current branch).
@@ -155,10 +160,12 @@ function M.init_session(cwd)
     return nil, oerr
   end
 
-  -- Crash recovery: revert any comments stuck in IN_FLIGHT state (item 4).
-  local recovered = comments.recover_in_flight()
+  -- Crash recovery: an op that was RUNNING when the process died has an unknown
+  -- outcome. Re-queue it flagged `uncertain` so the next reconcile adopts the
+  -- comment if it actually landed, instead of posting a duplicate (item 4).
+  local recovered = outbox.recover_stale()
   if recovered > 0 and vim.notify then
-    vim.notify(string.format("lreview: recovered %d comment(s) from interrupted push", recovered), vim.log.levels.INFO)
+    vim.notify(string.format("lreview: %d interrupted push op(s) re-queued for verification", recovered), vim.log.levels.INFO)
   end
 
   pull_request.upsert(detail)
@@ -187,7 +194,7 @@ end
 ---@param db_path string
 ---@param lazy_sqlite string
 ---@param args table  -- { cwd = string }
----@return table  -- { ok, detail?, err? }
+---@return table  -- { ok, detail?, err?, cwd }
 function M.resolve_mr_thread(db_path, lazy_sqlite, args)
   local cwd = args and args.cwd
   if not cwd then
@@ -195,15 +202,19 @@ function M.resolve_mr_thread(db_path, lazy_sqlite, args)
   end
   local ok, detail, err = pcall(M.resolve_current_mr, cwd)
   if not ok then
-    return { ok = false, err = tostring(detail) }
+    -- `cwd` is echoed so the completion (a closure created once, ever) can tell
+    -- which session this result belongs to instead of trusting a captured value.
+    return { ok = false, err = tostring(detail), cwd = cwd }
   end
   if not detail then
-    return { ok = false, err = err }
+    return { ok = false, err = err, cwd = cwd }
   end
-  return { ok = true, detail = detail }
+  return { ok = true, detail = detail, cwd = cwd }
 end
 
 local init_worker = nil
+-- Set per call, read by the singleton completion closure.
+local resolve_started = nil
 
 --- Non-blocking variant of init_session. Sets M.current with a local fallback
 --- detail immediately (no network), then resolves the real MR on a worker
@@ -224,10 +235,12 @@ function M.init_session_async(cwd, callback)
     return nil, oerr
   end
 
-  -- Crash recovery: revert any comments stuck in IN_FLIGHT state (item 4).
-  local recovered = comments.recover_in_flight()
+  -- Crash recovery: an op that was RUNNING when the process died has an unknown
+  -- outcome. Re-queue it flagged `uncertain` so the next reconcile adopts the
+  -- comment if it actually landed, instead of posting a duplicate (item 4).
+  local recovered = outbox.recover_stale()
   if recovered > 0 and vim.notify then
-    vim.notify(string.format("lreview: recovered %d comment(s) from interrupted push", recovered), vim.log.levels.INFO)
+    vim.notify(string.format("lreview: %d interrupted push op(s) re-queued for verification", recovered), vim.log.levels.INFO)
   end
 
   -- Set M.current with a local fallback immediately so the UI never blocks.
@@ -244,14 +257,15 @@ function M.init_session_async(cwd, callback)
 
   -- Resolve the real MR on a worker thread (network off the main thread).
   local timing = require("lreview.timing")
-  local resolve_started = nil
   if not init_worker then
     init_worker = thread.create_worker("lreview.review", "resolve_mr_thread", function(res)
       local detail = res and res.ok and res.detail
       if timing.enabled() and resolve_started then
         timing.record(timing.CAT_FLOW, "resolve_mr_roundtrip", (vim.uv.hrtime() / 1e6) - resolve_started)
+        resolve_started = nil
       end
-      if detail and M.current and M.current.cwd == cwd then
+      local cb_cwd = res and res.cwd
+      if detail and M.current and M.current.cwd == cb_cwd then
         -- Upgrade the session to the real (linked) MR detail.
         pull_request.upsert(detail)
         M.current.detail = detail
@@ -259,11 +273,11 @@ function M.init_session_async(cwd, callback)
         -- pull job sets vim.g.lreview_pull_job before calling init_session,
         -- which would otherwise spawn an unbounded chain of nested pull jobs.
         if not vim.g.lreview_pull_job and not detail.unlinked then
-          M.pull_review_async(cwd)
+          M.pull_review_async(nil)
         end
         -- Refresh any open UI (decor) now that the real MR is known.
         local sync2 = require("lreview.sync")
-        sync2.invalidate_diff_cache(cwd)
+        sync2.invalidate_diff_cache(cb_cwd)
         for bufnr, _ in pairs(require("lreview.ui.decor").enabled_buffers) do
           if vim.api.nvim_buf_is_valid(bufnr) then
             sync2.mark_dirty(bufnr)
@@ -271,15 +285,16 @@ function M.init_session_async(cwd, callback)
         end
         sync2.schedule()
       end
-      if callback and type(callback) == "function" then
-        callback(detail, (not detail) and (res and res.err) or nil)
-      end
+      -- Per-call callback comes out of the slot queue: this closure is created
+      -- once, so capturing `callback` would replay the FIRST session's callback.
+      thread.dispatch_cb("review.init", detail, (not detail) and (res and res.err) or nil)
     end)
   end
 
   if timing.enabled() then
     resolve_started = vim.uv.hrtime() / 1e6
   end
+  thread.arm("review.init", callback)
   init_worker:queue({ cwd = cwd })
   return fallback, nil
 end
@@ -435,233 +450,389 @@ function M.compute_change_set(mo_id)
   return cs
 end
 
---- Push the actual network calls for submit_review.
---- Extracted so both main-thread and thread paths can share it.
---- (Plan 07 §2.7 — item 3 decomposition.)
+--- Resolve the comment a reply should be threaded under.
+---
+--- GitHub replies need a *comment* id; GitLab needs the discussion id. A synced
+--- thread whose only remote comment is pending-delete (or whose first comment is
+--- itself an unpushed draft) has no valid parent, so this returns nil and the
+--- caller reports it — instead of concatenating nil into a CLI argument, which
+--- is what v3 did.
+---@param resolved table
+---@param t_id string
+---@return string|nil parent, string|nil err
+function M.reply_parent(resolved, t_id)
+  local cs = comments.comments_for_thread(t_id)
+  if resolved.provider == "gh" or resolved.provider == "github" then
+    for _, c in ipairs(cs) do
+      if c.remote_id and c.remote_id ~= "" and not comments.is_deleted(c.state) then
+        return c.remote_id, nil
+      end
+    end
+    return nil, "thread has no pushed comment to reply to"
+  end
+  if #cs == 0 then
+    return nil, "unknown thread"
+  end
+  -- GitLab threads replies by discussion id, which is our t_id.
+  return t_id, nil
+end
+
+--- Translate pending comment states into push ops. Pure: reads storage only.
+---
+--- Ops are keyed by (c_id, op), so re-running submit never queues the same
+--- mutation twice. The verdict becomes its own op whenever it cannot ride along
+--- with a comment batch — exactly the case (approve/request-changes with only
+--- replies or edits) where v3 dropped it silently.
+---@param detail lreview.MRDetail
+---@param resolved table
+---@param thread_id string|nil
+---@param verdict string|nil
+---@return table[] ops, string[] skipped
+function M.build_ops(detail, resolved, thread_id, verdict)
+  local cs = M.compute_change_set(detail.mo_id)
+  local ops, skipped = {}, {}
+  local function keep(item)
+    return not thread_id or item.t_id == thread_id
+  end
+
+  local has_new = false
+  for _, d in ipairs(cs.additions) do
+    if keep(d) then
+      has_new = true
+      ops[#ops + 1] = {
+        mo_id = detail.mo_id, t_id = d.t_id, c_id = d.c_id,
+        op = outbox.OP.CREATE_THREAD,
+        payload = { path = d.path, line = d.start_line, end_line = d.end_line, body = d.body },
+      }
+    end
+  end
+
+  for _, d in ipairs(cs.replies) do
+    if keep(d) then
+      local parent, perr = M.reply_parent(resolved, d.t_id)
+      if parent then
+        ops[#ops + 1] = {
+          mo_id = detail.mo_id, t_id = d.t_id, c_id = d.c_id, op = outbox.OP.REPLY,
+          payload = { body = d.body, parent = parent },
+        }
+      else
+        skipped[#skipped + 1] = string.format("%s:%d (%s)",
+          d.path or "?", d.start_line or 0, perr or "unthreadable")
+      end
+    end
+  end
+
+  for _, d in ipairs(cs.updates) do
+    if keep(d) then
+      ops[#ops + 1] = {
+        mo_id = detail.mo_id, t_id = d.t_id, c_id = d.c_id, op = outbox.OP.EDIT,
+        payload = { body = d.body, remote_id = d.remote_id },
+      }
+    end
+  end
+
+  for _, d in ipairs(cs.deletions) do
+    if keep(d) then
+      ops[#ops + 1] = {
+        mo_id = detail.mo_id, t_id = d.t_id, c_id = d.c_id, op = outbox.OP.DELETE,
+        payload = { remote_id = d.remote_id, body = d.body or "" },
+      }
+    end
+  end
+
+  if not thread_id and verdict and verdict ~= "COMMENT"
+      and adapter.supports(resolved, "review_verdict") then
+    local rides_along = has_new and adapter.supports(resolved, "atomic_inline_batch")
+    if not rides_along then
+      ops[#ops + 1] = {
+        mo_id = detail.mo_id, t_id = "__mr__", c_id = "__mr__", op = outbox.OP.VERDICT,
+        payload = { verdict = verdict, body = detail.description or "" },
+      }
+    end
+  end
+
+  return ops, skipped
+end
+
+--- Push the pending changes, driven by the outbox.
+---
+--- Replaces v3's "mark everything IN_FLIGHT, abort the batch on the first
+--- error", which stranded the untouched items in a state PENDING_PUSH_MASK
+--- excluded — i.e. drafts that were silently unpushable until a restart. Now:
+---   * each op is committed the moment it succeeds (status DONE + the local
+---     transition, in one transaction), so a later failure can never re-send a
+---     note that already landed;
+---   * a failure marks that op FAILED and stops its category, leaving the rest
+---     QUEUED — they get retried, not resurrected from a lock;
+---   * returns (pushed, err, remaining) so the caller can say "4 pushed, 2 left"
+---     instead of pretending a per-note API was atomic.
 ---@param detail lreview.MRDetail
 ---@param resolved table
 ---@param ctx table
 ---@param thread_id string|nil  -- optional filter
----@param verdict string
----@return integer count, string|nil err
+---@param verdict string|nil
+---@return integer pushed, string|nil err, integer remaining
 function M._submit_pushes(detail, resolved, ctx, thread_id, verdict)
-  -- Query pending comments via storage
-  local drafts = comments.get_pending_comments(detail.mo_id)
+  -- Hubs expect an uppercase event, and callers outside the confirm UI (tests,
+  -- scripts, custom adapters) may pass "approve"/"comment". Normalize once.
+  if verdict then verdict = tostring(verdict):upper() end
 
-  if thread_id then
-    local filtered = {}
-    for _, d in ipairs(drafts) do
-      if d.t_id == thread_id then
-        filtered[#filtered + 1] = d
-      end
-    end
-    drafts = filtered
-  end
-
-  -- Block push if any unresolved conflicts exist.
   local conflict_count = comments.count_conflicts(detail.mo_id)
   if conflict_count > 0 then
     return 0, string.format(
       "%d conflict(s) must be resolved before pushing. Use :LocalReviewConflicts to review.",
-      conflict_count)
+      conflict_count), outbox.count_pending(detail.mo_id)
   end
 
-  if not drafts or #drafts == 0 then
-    return 0, "no draft, edited, or deleted comments to submit"
-  end
+  local ops, skipped = M.build_ops(detail, resolved, thread_id, verdict)
+  outbox.enqueue(ops)
 
-  local new_threads_batch = {}
-  local replies = {}
-  local edits = {}
-  local deletes = {}
-
-  for _, d in ipairs(drafts) do
-    if d.state == comments.STATE.DELETED then
-      deletes[#deletes + 1] = {
-        t_id = d.t_id,
-        c_id = d.c_id,
-        remote_id = d.remote_id,
-        body = d.body or "",
-      }
-    elseif d.state == comments.STATE.MODIFIED then
-      edits[#edits + 1] = {
-        t_id = d.t_id,
-        c_id = d.c_id,
-        remote_id = d.remote_id,
-        body = d.body,
-      }
-    elseif comments.thread_is_draft(d.thread_state) then
-      new_threads_batch[#new_threads_batch + 1] = {
-        path = d.path,
-        line = d.start_line,
-        body = d.body,
-        t_id = d.t_id,
-        c_id = d.c_id,
-      }
-    else
-      local reply_to_id = d.t_id
-      if resolved.provider == "gh" or resolved.provider == "github" then
-        local cs = comments.comments_for_thread(d.t_id)
-        if #cs > 0 then
-          reply_to_id = cs[1].remote_id
-        end
-      end
-      replies[#replies + 1] = {
-        t_id = d.t_id,
-        c_id = d.c_id,
-        body = d.body,
-        reply_to_id = reply_to_id,
-      }
+  local function take_pending()
+    local all = outbox.pending(detail.mo_id)
+    if not thread_id then return all end
+    local out = {}
+    for _, op in ipairs(all) do
+      if op.t_id == thread_id then out[#out + 1] = op end
     end
+    return out
   end
 
-  local count = 0
+  if #take_pending() == 0 then
+    if #skipped > 0 then
+      return 0, "nothing pushable: " .. table.concat(skipped, "; "), 0
+    end
+    return 0, "no draft, edited, or deleted comments to submit", 0
+  end
 
-  -- Mark all pending items as IN_FLIGHT before pushing, as one DB transaction
-  -- (Plan 07 §2.7 — wrap local writes, never the network).
-  local function mark_all_in_flight()
-    storage.with_transaction(function()
-      for _, nt in ipairs(new_threads_batch) do comments.mark_in_flight(nt.c_id) end
-      for _, r in ipairs(replies) do comments.mark_in_flight(r.c_id) end
-      for _, e in ipairs(edits) do comments.mark_in_flight(e.c_id) end
-      for _, dl in ipairs(deletes) do comments.mark_in_flight(dl.c_id) end
+  local number = detail.number
+  local pushed = 0
+  local first_err = nil
+  local function record(err)
+    if err and not first_err then first_err = tostring(err) end
+  end
+
+  --- Commit a successful op together with its local state transition.
+  local function commit(op, remote_id, local_fn)
+    local ok_tx, tx_err = storage.with_transaction(function()
+      outbox.mark_done(op.op_id, remote_id)
+      if local_fn then local_fn(op) end
     end)
+    if not ok_tx then
+      -- The call landed but the bookkeeping did not. Keep the op non-terminal
+      -- and flag it uncertain: reconcile adopts it by body match instead of the
+      -- next submit posting a second copy.
+      outbox.mark_uncertain(op.op_id, "pushed but not recorded locally: " .. tostring(tx_err))
+      record("pushed a change that could not be recorded locally: " .. tostring(tx_err))
+      return false
+    end
+    pushed = pushed + 1
+    return true
   end
-  mark_all_in_flight()
 
-  -- 1. Submit new threads in a batch
-  if #new_threads_batch > 0 then
-    local ok, err = resolved.adapter.submit_inline_review(resolved.cfg, ctx, detail.number, new_threads_batch, nil, { verdict = verdict })
+  local function group(kind)
+    local out = {}
+    for _, op in ipairs(take_pending()) do
+      if op.op == kind then out[#out + 1] = op end
+    end
+    return out
+  end
+
+  local function consume_draft(op)
+    comments.delete_comment(op.c_id)
+    comments.delete_thread(op.t_id)
+  end
+
+  -- 1. New threads -----------------------------------------------------------
+  local creates = group(outbox.OP.CREATE_THREAD)
+  if #creates > 0 then
+    local function to_batch(list)
+      local batch = {}
+      for _, op in ipairs(list) do
+        batch[#batch + 1] = {
+          path = op.path, line = op.line, start_line = op.line, end_line = op.end_line,
+          body = op.body, t_id = op.t_id, c_id = op.c_id,
+        }
+      end
+      return batch
+    end
+
+    if adapter.supports(resolved, "atomic_inline_batch") then
+      -- One review POST: GitHub creates all comments or none. Lock the group
+      -- first: if the process dies mid-call, recovery flags these ops
+      -- uncertain and reconcile adopts whatever actually landed.
+      for _, op in ipairs(creates) do outbox.mark_running(op.op_id) end
+      local ok, err = resolved.adapter.submit_inline_review(
+        resolved.cfg, ctx, number, to_batch(creates), nil, { verdict = verdict })
+      if ok then
+        for _, op in ipairs(creates) do
+          -- The synced copy arrives via the reconcile that follows: a batch
+          -- review POST does not hand back per-comment ids.
+          commit(op, nil, consume_draft)
+        end
+      else
+        -- Nothing landed (all-or-nothing), so the group goes back to QUEUED.
+        for _, op in ipairs(creates) do outbox.mark_queued(op.op_id) end
+        record(err)
+      end
+    else
+      -- Per-note platforms: drive the loop here so every success is committed
+      -- immediately. This is what stops a mid-loop failure from re-posting the
+      -- notes that already landed.
+      for _, op in ipairs(creates) do
+        outbox.mark_running(op.op_id)
+        local ok, err = resolved.adapter.submit_inline_review(
+          resolved.cfg, ctx, number, to_batch({ op }))
+        if not ok then
+          outbox.mark_failed(op.op_id, err)
+          record(err)
+          break
+        end
+        commit(op, nil, consume_draft)
+      end
+    end
+  end
+
+  -- 2. Replies --------------------------------------------------------------
+  for _, op in ipairs(group(outbox.OP.REPLY)) do
+    outbox.mark_running(op.op_id)
+    local remote_id, err = resolved.adapter.submit_reply(
+      resolved.cfg, ctx, number, op.parent, op.body)
+    if not remote_id then
+      outbox.mark_failed(op.op_id, err)
+      record(err)
+      break
+    end
+    local rid = remote_id
+    commit(op, rid, function(o) comments.mark_comment_synced(o.c_id, rid) end)
+  end
+
+  -- 3. Edits ----------------------------------------------------------------
+  for _, op in ipairs(group(outbox.OP.EDIT)) do
+    if not op.remote_id or op.remote_id == "" then
+      outbox.mark_failed(op.op_id, "comment was never pushed")
+      record("an edited comment has no remote id; pull to reconcile before editing it")
+      break
+    end
+    outbox.mark_running(op.op_id)
+    local ok, err = resolved.adapter.update_comment(
+      resolved.cfg, ctx, number, op.t_id, op.remote_id, op.body)
     if not ok then
-      for _, nt in ipairs(new_threads_batch) do comments.revert_in_flight(nt.c_id, comments.STATE.DRAFT) end
-      for _, r in ipairs(replies) do comments.revert_in_flight(r.c_id, comments.STATE.DRAFT) end
-      for _, e in ipairs(edits) do comments.revert_in_flight(e.c_id, comments.STATE.MODIFIED) end
-      for _, dl in ipairs(deletes) do comments.revert_in_flight(dl.c_id, comments.STATE.DELETED) end
-      return 0, err
+      outbox.mark_failed(op.op_id, err)
+      record(err)
+      break
     end
-    -- Clear local drafts on success
-    for _, nt in ipairs(new_threads_batch) do
-      comments.delete_comment(nt.c_id)
-      comments.delete_thread(nt.t_id)
-    end
-    count = count + #new_threads_batch
+    commit(op, op.remote_id, function(o) comments.mark_clean(o.c_id) end)
   end
 
-  -- 2. Push replies
-  for _, r in ipairs(replies) do
-    local comment_id, err = resolved.adapter.submit_reply(resolved.cfg, ctx, detail.number, r.reply_to_id, r.body)
-    if not comment_id then
-      comments.revert_in_flight(r.c_id, comments.STATE.DRAFT)
-      return count, err
+  -- 4. Deletions ------------------------------------------------------------
+  for _, op in ipairs(group(outbox.OP.DELETE)) do
+    if not op.remote_id or op.remote_id == "" then
+      -- Local-only draft: there is no remote object to delete, so consuming it
+      -- locally IS the whole job (v3 sent a real API call and 404'd).
+      commit(op, nil, function(o) comments.delete_comment(o.c_id) end)
+    else
+      outbox.mark_running(op.op_id)
+      local ok, err = resolved.adapter.delete_comment(
+        resolved.cfg, ctx, number, op.t_id, op.remote_id)
+      if not ok then
+        outbox.mark_failed(op.op_id, err)
+        record(err)
+        break
+      end
+      commit(op, op.remote_id, function(o) comments.delete_comment(o.c_id) end)
     end
-    comments.mark_comment_synced(r.c_id, comment_id)
-    count = count + 1
   end
 
-  -- 3. Push edits
-  for _, e in ipairs(edits) do
-    local ok, err = resolved.adapter.update_comment(resolved.cfg, ctx, detail.number, e.remote_id, e.body)
+  -- 5. Verdict --------------------------------------------------------------
+  -- Only reached when build_ops decided the verdict could not ride along with a
+  -- comment batch. An adapter that claims review_verdict but ships no
+  -- submit_verdict is reported as a failure rather than a silent no-op.
+  for _, op in ipairs(group(outbox.OP.VERDICT)) do
+    local ok, err
+    outbox.mark_running(op.op_id)
+    if resolved.adapter.submit_verdict then
+      ok, err = resolved.adapter.submit_verdict(
+        resolved.cfg, ctx, number, op.verdict, op.body)
+    else
+      ok, err = false, "active adapter declares review_verdict but has no submit_verdict"
+    end
     if not ok then
-      comments.revert_in_flight(e.c_id, comments.STATE.MODIFIED)
-      return count, err
+      outbox.mark_failed(op.op_id, err)
+      record(err)
+      break
     end
-    comments.mark_clean(e.c_id)
-    count = count + 1
+    commit(op, nil)
   end
 
-  -- 4. Push deletes
-  for _, dl in ipairs(deletes) do
-    local ok, err = resolved.adapter.delete_comment(resolved.cfg, ctx, detail.number, dl.remote_id)
-    if not ok then
-      comments.revert_in_flight(dl.c_id, comments.STATE.DELETED)
-      return count, err
-    end
-    comments.delete_comment(dl.c_id)
-    count = count + 1
+  local remaining = #take_pending()
+  if #skipped > 0 then
+    record("skipped: " .. table.concat(skipped, "; "))
   end
-
-  return count, nil
+  return pushed, first_err, remaining
 end
 
 --- Build the confirmation summary and verdict choice for submit_review.
 --- Runs on the main thread (UI required).
+---
+--- `done(verdict, cancelled)` is invoked LATER when the float is shown: the
+--- answer arrives on a keypress. v3 read the choice immediately after
+--- ask_confirmation returned, so it always saw nil and reported every push as
+--- cancelled — interactive submit never pushed anything.
 ---@param resolved table
 ---@param thread_id string|nil
----@return string|nil verdict, boolean cancelled
-local function confirm_submit(resolved, thread_id)
+---@param done fun(verdict: string|nil, cancelled: boolean)
+local function confirm_submit(resolved, thread_id, done)
   local detail = M.current.detail
-  local drafts = comments.get_pending_comments(detail.mo_id)
-  if thread_id then
-    local filtered = {}
-    for _, d in ipairs(drafts) do
-      if d.t_id == thread_id then
-        filtered[#filtered + 1] = d
-      end
-    end
-    drafts = filtered
+  local cs = M.compute_change_set(detail.mo_id)
+  local function keep(item)
+    return not thread_id or item.t_id == thread_id
   end
 
-  local new_threads_batch = {}
-  local replies = {}
-  local edits = {}
-  local deletes = {}
-
-  for _, d in ipairs(drafts) do
-    if d.state == comments.STATE.DELETED then
-      deletes[#deletes + 1] = { t_id = d.t_id, c_id = d.c_id, body = d.body or "" }
-    elseif d.state == comments.STATE.MODIFIED then
-      edits[#edits + 1] = { t_id = d.t_id, c_id = d.c_id, body = d.body }
-    elseif comments.thread_is_draft(d.thread_state) then
-      new_threads_batch[#new_threads_batch + 1] = {
-        path = d.path, line = d.start_line, body = d.body,
-        t_id = d.t_id, c_id = d.c_id,
-      }
-    else
-      replies[#replies + 1] = {
-        t_id = d.t_id, c_id = d.c_id, body = d.body,
-      }
-    end
+  local lines = {}
+  local total = 0
+  local function snippet(body)
+    return ((body or ""):gsub("\n", " ")):sub(1, 45)
+  end
+  local function add(kind, text)
+    lines[#lines + 1] = string.format("  [%-12s] %s", kind, text)
   end
 
-  if #new_threads_batch == 0 and #replies == 0 and #edits == 0 and #deletes == 0 then
-    return nil, false
+  for _, d in ipairs(cs.additions) do
+    if keep(d) then total = total + 1; add("New Thread", string.format("%s:%d: %s", d.path, d.start_line, snippet(d.body))) end
+  end
+  for _, d in ipairs(cs.replies) do
+    if keep(d) then total = total + 1; add("New Reply", snippet(d.body)) end
+  end
+  for _, d in ipairs(cs.updates) do
+    if keep(d) then total = total + 1; add("Edit Note", snippet(d.body)) end
+  end
+  for _, d in ipairs(cs.deletions) do
+    if keep(d) then total = total + 1; add("Delete Note", snippet(d.body)) end
   end
 
-  -- Format confirmation summary
-  local summary = { "Pending Review Changes:" }
-  for _, nt in ipairs(new_threads_batch) do
-    local snippet = nt.body:gsub("\n", " "):sub(1, 45)
-    summary[#summary + 1] = string.format("  [New Thread]  %s:%d: %s", nt.path, nt.line, snippet)
+  if total == 0 then
+    -- Nothing queued and nothing to confirm.
+    done(nil, false)
+    return
   end
-  for _, r in ipairs(replies) do
-    local snippet = r.body:gsub("\n", " "):sub(1, 45)
-    summary[#summary + 1] = string.format("  [New Reply]   %s", snippet)
-  end
-  for _, e in ipairs(edits) do
-    local snippet = e.body:gsub("\n", " "):sub(1, 45)
-    summary[#summary + 1] = string.format("  [Edit Note]   %s", snippet)
-  end
-  for _, dl in ipairs(deletes) do
-    local snippet = dl.body:gsub("\n", " "):sub(1, 45)
-    summary[#summary + 1] = string.format("  [Delete Note] %s", snippet)
-  end
+
+  table.insert(lines, 1, "Pending Review Changes:")
 
   local has_verdict = adapter.supports(resolved, "review_verdict")
-
   local confirm_ui = require("lreview.ui.confirm")
-  local choice_verdict = nil
 
   if vim.g.lreview_test_mode then
-    return "COMMENT", false
-  else
-    confirm_ui.ask_confirmation(summary, { has_verdict = has_verdict }, function(choice)
-      choice_verdict = choice
-    end)
-    if not choice_verdict then
-      return nil, true
-    end
-    return choice_verdict, false
+    done("COMMENT", false)
+    return
   end
+
+  confirm_ui.ask_confirmation(lines, { has_verdict = has_verdict }, function(choice)
+    if not choice then
+      done(nil, true)
+    else
+      done(choice, false)
+    end
+  end)
 end
 
 --- Thread-entry point for submit_review.
@@ -694,21 +865,16 @@ function M.submit_review_thread(db_path, lazy_sqlite, args)
   thread_mode = true
   M._notifications = {}
 
-  -- Push network calls
-  local count, err = M._submit_pushes(args.detail, resolved, ctx, args.thread_id, args.verdict)
+  local count, err, remaining = M._submit_pushes(
+    args.detail, resolved, ctx, args.thread_id, args.verdict)
 
-  -- Reconcile after push (fetch fresh remote threads + reconcile)
-  if not err then
-    local remote_threads = M._fetch_remote_threads(args.detail, resolved, ctx)
-    if remote_threads then
-      M._reconcile_threads(args.detail, remote_threads)
-    end
-  else
-    -- On error, still reconcile to pick up any partial state
-    local remote_threads = M._fetch_remote_threads(args.detail, resolved, ctx)
-    if remote_threads then
-      M._reconcile_threads(args.detail, remote_threads)
-    end
+  -- Reconcile on success AND on partial failure: a half-pushed batch needs the
+  -- remote's truth to adopt what landed (and to surface conflicts) before the
+  -- next submit retries the rest.
+  local remote_threads = M._fetch_remote_threads(args.detail, resolved, ctx)
+  if remote_threads then
+    M._reconcile_threads(args.detail, remote_threads)
+    outbox.prune_done(args.detail.mo_id)
   end
 
   local notifications = M._notifications
@@ -718,110 +884,140 @@ function M.submit_review_thread(db_path, lazy_sqlite, args)
   M.current = old_current
   db:close()
 
-  return { ok = (err == nil), count = count or 0, err = err, notifications = notifications }
+  return {
+    ok = (err == nil),
+    count = count or 0,
+    err = err,
+    remaining = remaining or 0,
+    notifications = notifications,
+  }
 end
 
 local submit_worker = nil
 
---- Submit the review: push draft inline comments (new threads and replies) for the current MR.
---- Only pushes inline comments; does NOT change platform review state.
+--- Refresh every buffer that shows review state, through the sync bus.
+local function refresh_review_ui()
+  local sync = require("lreview.sync")
+  local cwd = M.current and M.current.cwd
+  if cwd then
+    sync.invalidate_diff_cache(cwd)
+  end
+  for bufnr, _ in pairs(require("lreview.ui.decor").enabled_buffers) do
+    if vim.api.nvim_buf_is_valid(bufnr) then
+      sync.mark_dirty(bufnr)
+    end
+  end
+  sync.schedule()
+end
+
+--- Ensure the (singleton) submit worker exists.
+---
+--- The completion closure is created ONCE, so it must not capture a per-call
+--- `callback` — it pulls the caller's callback out of the thread slot queue that
+--- `submit_review` armed for this specific job.
+local function ensure_submit_worker()
+  if submit_worker then return end
+  submit_worker = thread.create_worker("lreview.review", "submit_review_thread", function(res)
+    -- Replay notifications collected on the worker thread (item 1).
+    if res and res.notifications then
+      for _, n in ipairs(res.notifications) do
+        M._notifications[#M._notifications + 1] = n
+      end
+      M.drain_notifications()
+    end
+
+    local success = (res and res.ok) == true
+    local count = (res and res.count) or 0
+    local remaining = (res and res.remaining) or 0
+    local err = res and res.err
+
+    if success then
+      refresh_review_ui()
+    elseif err then
+      -- Never fail silently: surface the push error to the user (item 3).
+      vim.notify("lreview: push failed: " .. tostring(err), vim.log.levels.ERROR)
+    end
+    if remaining > 0 then
+      vim.notify(string.format(
+        "lreview: %d change(s) still queued — they stay as drafts, run :LocalReviewSubmit again",
+        remaining), vim.log.levels.WARN)
+    end
+
+    thread.dispatch_cb("review.submit", success, count, err, remaining)
+  end)
+end
+
+--- Submit the review: push draft inline comments (new threads, replies, edits,
+--- deletions) for the current MR.
+---
 --- Runs the network push on a worker thread. The confirmation UI runs on the
---- main thread first. In test mode (vim.g.lreview_test_mode) the push runs
---- synchronously on the main thread for deterministic testing. (item 3)
----@param thread_id string|nil  -- optional thread ID to submit only comments from a single thread
----@param callback fun(ok: boolean, count: integer, err: string|nil)|nil
+--- main thread first and the push continues from its callback. In test mode
+--- (vim.g.lreview_test_mode) everything runs synchronously for deterministic
+--- testing.
+---@param thread_id string|nil  -- optional thread ID to submit only one thread's comments
+---@param callback fun(ok: boolean, count: integer, err: string|nil, remaining: integer|nil)|nil
 ---@return integer pushed, string|nil err  -- in test mode: synchronous; async mode: returns 0, nil
 function M.submit_review(thread_id, callback)
   if not M.current then
-    if callback then callback(false, 0, "no active review") end
+    if callback then callback(false, 0, "no active review", 0) end
     return 0, "no active review"
   end
 
   local detail = M.current.detail
   local resolved = adapter.resolve(M.current.cwd)
   if not resolved then
-    if callback then callback(false, 0, "no git remote detected") end
+    if callback then callback(false, 0, "no git remote detected", 0) end
     return 0, "no git remote detected"
   end
 
-  -- Check conflicts before showing UI
+  -- Check conflicts before showing UI.
   local conflict_count = comments.count_conflicts(detail.mo_id)
   if conflict_count > 0 then
     local err = string.format(
       "%d conflict(s) must be resolved before pushing. Use :LocalReviewConflicts to review.",
       conflict_count)
-    if callback then callback(false, 0, err) end
+    if callback then callback(false, 0, err, outbox.count_pending(detail.mo_id)) end
     return 0, err
   end
 
-  -- Confirmation UI (main thread)
-  local verdict, cancelled = confirm_submit(resolved, thread_id)
-  if cancelled then
-    if vim.notify then
+  -- Results captured when the confirmation resolves synchronously (test mode).
+  local sync_pushed, sync_err
+
+  confirm_submit(resolved, thread_id, function(verdict, cancelled)
+    if cancelled then
       vim.notify("lreview: push cancelled", vim.log.levels.INFO)
+      if callback then callback(false, 0, nil, 0) end
+      return
     end
-    if callback then callback(false, 0, nil) end
-    return 0, nil
-  end
-  if not verdict then
-    if callback then callback(false, 0, "no draft, edited, or deleted comments to submit") end
-    return 0, "no draft, edited, or deleted comments to submit"
-  end
+    if not verdict then
+      local err = "no draft, edited, or deleted comments to submit"
+      if callback then callback(false, 0, err, 0) end
+      return
+    end
 
-  -- Test mode: run synchronously on the main thread for deterministic testing.
-  if vim.g.lreview_test_mode then
-    local count, err = M._submit_pushes(detail, resolved, adapter.ctx(resolved, detail.number), thread_id, verdict)
-    -- Reconcile
-    M.sync_review()
-    if callback then callback(err == nil, count or 0, err) end
-    return count or 0, err
-  end
+    -- Test mode: run synchronously on the main thread for deterministic tests.
+    if vim.g.lreview_test_mode then
+      local count, err, remaining = M._submit_pushes(
+        detail, resolved, adapter.ctx(resolved, detail.number), thread_id, verdict)
+      M.sync_review()
+      sync_pushed, sync_err = count, err
+      if callback then callback(err == nil, count or 0, err, remaining) end
+      return
+    end
 
-  -- Normal mode: queue thread for network push (item 3).
-  if not submit_worker then
-    submit_worker = thread.create_worker("lreview.review", "submit_review_thread", function(res)
-      -- Replay notifications collected on the worker thread (item 1).
-      if res and res.notifications then
-        for _, n in ipairs(res.notifications) do
-          M._notifications[#M._notifications + 1] = n
-        end
-        M.drain_notifications()
-      end
+    -- Normal mode: push on the worker thread (item 3), with THIS call's
+    -- callback armed so the singleton worker replies to the right caller.
+    ensure_submit_worker()
+    thread.arm("review.submit", callback)
+    submit_worker:queue({
+      cwd = M.current.cwd,
+      detail = M.current.detail,
+      thread_id = thread_id,
+      verdict = verdict,
+    })
+  end)
 
-      local success = res and res.ok
-      if success then
-        -- Refresh UI via sync bus (item 6).
-        local sync = require("lreview.sync")
-        local cwd = M.current and M.current.cwd
-        if cwd then
-          sync.invalidate_diff_cache(cwd)
-        end
-        for bufnr, _ in pairs(require("lreview.ui.decor").enabled_buffers) do
-          if vim.api.nvim_buf_is_valid(bufnr) then
-            sync.mark_dirty(bufnr)
-          end
-        end
-        sync.schedule()
-      elseif res and res.err then
-        -- Never fail silently: surface the push error to the user (item 3).
-        if vim.notify then
-          vim.notify("lreview: push failed: " .. res.err, vim.log.levels.ERROR)
-        end
-      end
-
-      if callback then
-        callback(success == true, (res and res.count) or 0, res and res.err)
-      end
-    end)
-  end
-
-  submit_worker:queue({
-    cwd = M.current.cwd,
-    detail = M.current.detail,
-    thread_id = thread_id,
-    verdict = verdict,
-  })
-
+  if sync_pushed ~= nil then return sync_pushed, sync_err end
   return 0, nil
 end
 
@@ -870,6 +1066,12 @@ function M._reconcile_threads(detail, remote_threads)
     local_by_thread[lc.t_id] = local_by_thread[lc.t_id] or {}
     local_by_thread[lc.t_id][lc.c_id] = lc
   end
+
+  -- Crash-recovery index: ops that were RUNNING when the process died have an
+  -- unknown outcome. If the remote turns out to already contain that body, we
+  -- adopt it (mark the op DONE, consume the local draft) instead of leaving the
+  -- draft queued to be posted a second time on the next submit.
+  local uncertain = outbox.uncertain_by_body(detail.mo_id)
 
   for _, t in ipairs(remote_threads) do
     remote_t_ids[t.t_id] = true
@@ -972,6 +1174,19 @@ function M._reconcile_threads(detail, remote_threads)
           end
         end
       else
+        -- No local copy. Before inserting a fresh SYNCED row, check whether
+        -- this is a comment WE pushed whose result was never recorded locally
+        -- (crash between the network call and the outbox write). Adopting it
+        -- consumes the local draft so it cannot be posted twice.
+        local adopt = uncertain[c.body or ""]
+        if adopt then
+          outbox.mark_done(adopt.op_id, c.remote_id)
+          comments.delete_comment(adopt.c_id)
+          if adopt.op == outbox.OP.CREATE_THREAD then
+            comments.delete_thread(adopt.t_id)
+          end
+          uncertain[c.body or ""] = nil
+        end
         comments.add_comment({
           c_id = c.c_id,
           t_id = t.t_id,
@@ -1149,12 +1364,11 @@ function M.pull_review_async(callback)
         end
         sync.schedule()
       end
-      if callback and type(callback) == "function" then
-        callback(success == true)
-      end
+      thread.dispatch_cb("review.pull", success == true)
     end)
   end
 
+  thread.arm("review.pull", callback)
   thread_worker:queue({
     cwd = M.current.cwd or vim.fn.getcwd(),
     detail = M.current.detail,
@@ -1227,12 +1441,11 @@ function M.close_review_async(number, callback)
           pull_request_storage.update_state(pr_detail.mo_id, "closed")
         end
       end
-      if callback and type(callback) == "function" then
-        callback(res and res.ok, res and res.err or nil)
-      end
+      thread.dispatch_cb("review.close", res and res.ok, res and res.err or nil)
     end)
   end
 
+  thread.arm("review.close", callback)
   close_worker:queue({ cwd = cwd, detail = detail, number = num })
   return false, nil
 end
@@ -1299,12 +1512,11 @@ function M.approve_review_async(number, callback)
           pull_request_storage.update_state(pr_detail.mo_id, "approved")
         end
       end
-      if callback and type(callback) == "function" then
-        callback(res and res.ok, res and res.err or nil)
-      end
+      thread.dispatch_cb("review.approve", res and res.ok, res and res.err or nil)
     end)
   end
 
+  thread.arm("review.approve", callback)
   approve_worker:queue({ cwd = cwd, detail = detail, number = num })
   return false, nil
 end
@@ -1340,7 +1552,9 @@ function M.resolve_thread_thread(db_path, lazy_sqlite, args)
 
   M.current = old_current
   db:close()
-  return { ok = ok, err = err }
+  -- Echo which thread this result belongs to: the completion closure is shared
+  -- across all calls, so it must not use a captured `thread_id`.
+  return { ok = ok, err = err, thread_id = args.thread_id, resolved_val = args.resolved_val }
 end
 
 local resolve_worker = nil
@@ -1375,15 +1589,14 @@ function M.resolve_thread_async(thread_id, resolved_val, callback)
 
   if not resolve_worker then
     resolve_worker = thread.create_worker("lreview.review", "resolve_thread_thread", function(res)
-      if res and res.ok then
-        comments.resolve_thread(thread_id, resolved_val)
+      if res and res.ok and res.thread_id then
+        comments.resolve_thread(res.thread_id, res.resolved_val == true)
       end
-      if callback and type(callback) == "function" then
-        callback(res and res.ok, res and res.err or nil)
-      end
+      thread.dispatch_cb("review.resolve_thread", res and res.ok, res and res.err or nil)
     end)
   end
 
+  thread.arm("review.resolve_thread", callback)
   resolve_worker:queue({ cwd = cwd, detail = detail, thread_id = thread_id, resolved_val = resolved_val })
   return false, nil
 end
@@ -1426,11 +1639,10 @@ function M.create_review_async(opts, cwd, callback)
   cwd = cwd or (M.current and M.current.cwd) or vim.fn.getcwd()
   if not create_worker then
     create_worker = thread.create_worker("lreview.review", "create_review_thread", function(res)
-      if callback and type(callback) == "function" then
-        callback(res and res.url, res and res.err or nil)
-      end
+      thread.dispatch_cb("review.create", res and res.url, res and res.err or nil)
     end)
   end
+  thread.arm("review.create", callback)
   create_worker:queue({ cwd = cwd, opts = opts })
   return false, nil
 end
@@ -1489,11 +1701,10 @@ function M.request_reviewers_async(reviewers, number, cwd, callback)
 
   if not request_reviewers_worker then
     request_reviewers_worker = thread.create_worker("lreview.review", "request_reviewers_thread", function(res)
-      if callback and type(callback) == "function" then
-        callback(res and res.ok, res and res.err or nil)
-      end
+      thread.dispatch_cb("review.request_reviewers", res and res.ok, res and res.err or nil)
     end)
   end
+  thread.arm("review.request_reviewers", callback)
   request_reviewers_worker:queue({
     cwd = cwd,
     detail = M.current and M.current.detail,
@@ -1531,7 +1742,9 @@ function M.update_review_thread(db_path, lazy_sqlite, args)
 
   M.current = old_current
   db:close()
-  return { ok = ok, err = err }
+  -- Echo the edited fields: the completion closure is shared across all calls,
+  -- so reading captured upvalues would write a PREVIOUS edit into the cache.
+  return { ok = ok, err = err, number = num, title = args.title, body = args.body }
 end
 
 local update_worker = nil
@@ -1553,26 +1766,30 @@ function M.update_review_async(title, body, number, cwd, callback)
 
   if not update_worker then
     update_worker = thread.create_worker("lreview.review", "update_review_thread", function(res)
-      if res and res.ok and M.current and M.current.detail.number == num then
-        M.current.detail.title = title
-        M.current.detail.body = body
+      if res and res.ok and res.title ~= nil and M.current
+          and M.current.detail and M.current.detail.number == res.number then
+        -- `description` is the model's field name (mappers write it); the old
+        -- code wrote `.body`, which nothing read — the same drift that left the
+        -- MR description blank in the detail editor.
+        M.current.detail.title = res.title
+        M.current.detail.description = res.body
         local pull_request = require("lreview.storage.pull_request")
         local ok_storage = storage.open()
         if ok_storage then
-          local key = (M.current and M.current.detail.provider) .. ":" .. (M.current and M.current.detail.repo) .. ":" .. num
+          local key = (M.current.detail.provider) .. ":" .. (M.current.detail.repo) .. ":" .. res.number
           local cached = pull_request.get(key)
           if cached then
-            cached.title = title
-            cached.body = body
+            cached.title = res.title
+            cached.description = res.body
             pull_request.upsert(cached)
           end
         end
       end
-      if callback and type(callback) == "function" then
-        callback(res and res.ok, res and res.err or nil)
-      end
+      thread.dispatch_cb("review.update", res and res.ok, res and res.err or nil)
     end)
   end
+
+  thread.arm("review.update", callback)
   update_worker:queue({ cwd = cwd, detail = M.current and M.current.detail, number = num, title = title, body = body })
   return false, nil
 end

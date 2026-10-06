@@ -28,17 +28,22 @@ M.THREAD_STATE = THREAD_STATE
 -- ---------------------------------------------------------------------------
 -- Comment States (Bit Flags)
 -- ---------------------------------------------------------------------------
+-- These describe a comment's CONTENT relative to the remote. "Is it currently
+-- being pushed" is deliberately NOT a comment state — that lives in the
+-- `push_ops` outbox (storage/outbox.lua). Encoding the push lock here (v3's
+-- IN_FLIGHT) meant an interrupted submit left rows outside PENDING_PUSH_MASK,
+-- which silently hid drafts until a restart.
 local STATE = {
   DRAFT     = 1,  -- (000001) New local reply, never pushed
   SYNCED    = 2,  -- (000010) Matches current remote state
-  IN_FLIGHT = 4,  -- (000100) Currently pushing over network thread
+                    -- (4 reserved: was IN_FLIGHT in v3)
   MODIFIED  = 8,  -- (001000) Synced comment edited locally (not yet pushed)
   DELETED   = 16, -- (010000) Synced comment deleted locally (not yet pushed)
   CONFLICT  = 32, -- (100000) Remote changed while we had local edits pending
 }
 M.STATE = STATE
 
--- Mask for all states that require a push (excludes SYNCED, IN_FLIGHT, and CONFLICT).
+-- Mask for all states that require a push (excludes SYNCED and CONFLICT).
 M.PENDING_PUSH_MASK = STATE.DRAFT + STATE.MODIFIED + STATE.DELETED -- 25
 
 -- ---------------------------------------------------------------------------
@@ -48,7 +53,6 @@ M.PENDING_PUSH_MASK = STATE.DRAFT + STATE.MODIFIED + STATE.DELETED -- 25
 
 function M.is_draft(s)     return s == STATE.DRAFT     end
 function M.is_synced(s)    return s == STATE.SYNCED    end
-function M.is_in_flight(s) return s == STATE.IN_FLIGHT end
 function M.is_modified(s) return s == STATE.MODIFIED end
 function M.is_deleted(s)  return s == STATE.DELETED  end
 function M.is_conflict(s) return s == STATE.CONFLICT end
@@ -250,10 +254,6 @@ function M.add_comment(c)
     conflict_remote_body = c.conflict_remote_body,
     conflict_reason = c.conflict_reason,
     conflict_detected_at = c.conflict_detected_at,
-    -- prev_state: the state before IN_FLIGHT, used for crash recovery
-    -- (item 4). Persisted so recover_in_flight can restore the exact prior
-    -- state (MODIFIED/DELETED/DRAFT) rather than always falling back to DRAFT.
-    prev_state = c.prev_state,
   }
 
   storage.execute([[
@@ -319,31 +319,6 @@ function M.mark_clean(c_id)
   if c then
     local decoded = decode_comment(c)
     decoded.state = STATE.SYNCED
-    M.add_comment(decoded)
-  end
-end
-
---- Mark a comment state as IN_FLIGHT.
----@param c_id string
-function M.mark_in_flight(c_id)
-  local c = storage.query("SELECT * FROM comments WHERE c_id = ?", c_id)[1]
-  if c then
-    local decoded = decode_comment(c)
-    decoded.prev_state = decoded.state
-    decoded.state = STATE.IN_FLIGHT
-    M.add_comment(decoded)
-  end
-end
-
---- Revert a comment state from IN_FLIGHT back to its previous state.
----@param c_id string
----@param fallback_state integer|nil
-function M.revert_in_flight(c_id, fallback_state)
-  local c = storage.query("SELECT * FROM comments WHERE c_id = ?", c_id)[1]
-  if c then
-    local decoded = decode_comment(c)
-    decoded.state = decoded.prev_state or fallback_state or STATE.DRAFT
-    decoded.prev_state = nil
     M.add_comment(decoded)
   end
 end
@@ -510,21 +485,8 @@ function M.count_conflicts(mo_id)
   return (rows[1] and rows[1].n) or 0
 end
 
---- Recover any comments stuck in IN_FLIGHT state (crash recovery).
---- If a submit was interrupted mid-flight, the comments would be left in
---- IN_FLIGHT state. This reverts them to their previous state so they
---- can be submitted again. Called once at startup.
---- (Plan 07 §2.6.1 — invariant: no comments left in IN_FLIGHT on startup.)
-function M.recover_in_flight()
-  local rows = storage.query("SELECT * FROM comments WHERE state = ?", STATE.IN_FLIGHT)
-  for _, row in ipairs(rows) do
-    local decoded = decode_comment(row)
-    local prev = decoded.prev_state or STATE.DRAFT
-    decoded.state = prev
-    decoded.prev_state = nil
-    M.add_comment(decoded)
-  end
-  return #rows
-end
+-- NOTE: v3's `recover_in_flight()` is gone. Crash recovery is now
+-- outbox.recover_stale(), which re-queues interrupted push ops (and flags them
+-- `uncertain` so reconcile adopts a comment that landed rather than re-posting).
 
 return M

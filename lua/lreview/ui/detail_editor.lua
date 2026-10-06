@@ -68,8 +68,12 @@ function M.open(detail)
     "## Description",
   }
 
-  if detail.body and detail.body ~= "" then
-    for line in (detail.body .. "\n"):gmatch("(.-)\r?\n") do
+  -- `description` is the model's field (mappers write it); `body` is kept as a
+  -- fallback for locally-built fallback details. Reading only `.body` meant the
+  -- MR description rendered as an empty block for every real MR.
+  local desc = detail.description or detail.body
+  if desc and desc ~= "" then
+    for line in (desc .. "\n"):gmatch("(.-)\r?\n") do
       lines[#lines + 1] = line
     end
   else

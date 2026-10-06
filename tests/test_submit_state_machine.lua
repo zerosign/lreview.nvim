@@ -13,6 +13,8 @@ print("TEST: Starting Submit State Machine Unit Tests...")
 
 local test_db = "tmp/test_submit_state_machine.db"
 vim.fn.delete(test_db)
+vim.fn.delete(test_db .. "-wal")
+vim.fn.delete(test_db .. "-shm")
 
 init.setup({
   defaults = { db_path = test_db }
@@ -34,11 +36,19 @@ pull_request.upsert({
   state = "open",
 })
 
--- 1. Test Comment State Constants
-if comments.STATE.IN_FLIGHT ~= 4 then
-  print("FAIL: STATE.IN_FLIGHT is not 4")
+-- 1. Comment state constants: the push lock no longer lives in comments.state.
+if comments.STATE.IN_FLIGHT ~= nil then
+  print("FAIL: STATE.IN_FLIGHT should be retired (push lock lives in push_ops)")
   os.exit(1)
 end
+if comments.STATE.DRAFT ~= 1 or comments.STATE.SYNCED ~= 2
+    or comments.STATE.MODIFIED ~= 8 or comments.STATE.DELETED ~= 16
+    or comments.STATE.CONFLICT ~= 32 then
+  print("FAIL: content state values changed unexpectedly")
+  os.exit(1)
+end
+
+local outbox = require("lreview.storage.outbox")
 
 -- Create parent thread to satisfy foreign key constraints
 comments.create_thread({
@@ -58,18 +68,42 @@ comments.add_comment({
   state = comments.STATE.DRAFT,
 })
 
--- 2. Test Transition: DRAFT -> IN_FLIGHT -> REVERT
-comments.mark_in_flight("c_flight_1")
-local c1 = storage.query("SELECT * FROM comments WHERE c_id = ?", "c_flight_1")[1]
-if not c1 or c1.state ~= comments.STATE.IN_FLIGHT then
-  print("FAIL: mark_in_flight failed to set STATE.IN_FLIGHT")
+-- 2. Test Transition: DRAFT -> QUEUED -> FAILED, comment state untouched.
+-- v3 flipped the comment itself to IN_FLIGHT, which fell outside
+-- PENDING_PUSH_MASK: an interrupted submit left drafts invisible and
+-- unpushable until restart. The outbox keeps the lock in its own row.
+outbox.enqueue({ {
+  mo_id = mo_id, t_id = "t_1", c_id = "c_flight_1", op = outbox.OP.REPLY,
+  payload = { body = "Test in flight comment", parent = "r-remote-1" },
+} })
+local ops = outbox.pending(mo_id)
+if #ops ~= 1 then
+  print("FAIL: enqueue should create exactly one op, got " .. tostring(#ops))
+  os.exit(1)
+end
+if ops[1].status ~= outbox.STATUS.QUEUED then
+  print("FAIL: new op should be QUEUED")
+  os.exit(1)
+end
+if ops[1].c_id ~= "c_flight_1" then
+  print("FAIL: op should reference the comment")
   os.exit(1)
 end
 
-comments.revert_in_flight("c_flight_1", comments.STATE.DRAFT)
+outbox.mark_running(ops[1].op_id)
+outbox.mark_failed(ops[1].op_id, "simulated network failure")
 local c2 = storage.query("SELECT * FROM comments WHERE c_id = ?", "c_flight_1")[1]
 if not c2 or c2.state ~= comments.STATE.DRAFT then
-  print("FAIL: revert_in_flight failed to restore STATE.DRAFT")
+  print("FAIL: comment must remain DRAFT through a failed push")
+  os.exit(1)
+end
+-- A FAILED op is still pending, so the very next submit retries it.
+local retried = 0
+for _, op in ipairs(outbox.pending(mo_id)) do
+  if op.status == outbox.STATUS.FAILED then retried = retried + 1 end
+end
+if retried ~= 1 then
+  print("FAIL: failed op should remain retryable (pending)")
   os.exit(1)
 end
 
