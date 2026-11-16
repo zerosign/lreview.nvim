@@ -232,6 +232,28 @@ function M.open_reply_float(t_id)
   vim.keymap.set("n", "<esc>", cancel, opts)
   vim.keymap.set({ "n", "i" }, "<C-c>", cancel, opts)
 
+  -- Shared @mention + MR/PR link completion (same logic as the scratchpad).
+  local completion = require("lreview.ui.completion")
+  completion.attach(buf)
+
+  -- <C-g> inserts a ```suggestion block from the thread's target lines, when
+  -- the thread has a valid code range on a buffer that's open.
+  local context_lines
+  local thread = comments.get_thread(t_id)
+  if thread and M.state.path then
+    local code_bufnr = vim.fn.bufnr(M.state.path)
+    if code_bufnr ~= -1 and vim.api.nvim_buf_is_valid(code_bufnr) then
+      local s = math.max(1, thread.start_line or 1)
+      local e = math.max(s, thread.end_line or s)
+      context_lines = vim.api.nvim_buf_get_lines(code_bufnr, s - 1, e, false)
+    end
+  end
+  if context_lines and #context_lines > 0 then
+    vim.keymap.set({ "n", "i" }, "<C-g>", function()
+      completion.insert_suggestion(buf, win, context_lines)
+    end, opts)
+  end
+
   -- Start in insert mode so the user can type immediately.
   vim.cmd("startinsert")
 
