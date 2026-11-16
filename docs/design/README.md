@@ -24,7 +24,7 @@ All issues discussed are grouped into **four problem domains**:
 | [02-file-overview.md](02-file-overview.md) | File-list overview, minimal & non-invasive | A 2 |
 | [03-review-verdict.md](03-review-verdict.md) | Review verdict (approve/request-changes) + popup confirmation, multiplatform | A 6 |
 | [04-sync-bus.md](04-sync-bus.md) | Centralized panel/status sync, efficient propagation, keymap conflict | A 7 |
-| [14-ui-sign-float-thread.md](14-ui-sign-float-thread.md) | Sign + floating window thread UI with stacked reply float (State 3) | A 8 |
+| [14-ui-sign-float-thread.md](14-ui-sign-float-thread.md) | Sign + floating window thread UI with stacked reply float (State 3) — **implemented** | A 8 |
 
 ### Domain 3 — Requesting Review UX (Journey B)
 *The author's per-step experience.*
@@ -55,7 +55,7 @@ All issues discussed are grouped into **four problem domains**:
 
 ## Implementation Status (current)
 
-- **Implemented:** docs 01, 02, 03, 05, 06, 08; the full thread model (09) —
+- **Implemented:** docs 01, 02, 03, 05, 06, 08, **14 (UI: Sign + Float + Stacked Reply)**; the full thread model (09) —
   `thread.lua`, `base.lua` io.popen fallback, `sync_review_thread`,
   `pull_review_async`, `gc_work` fix, `vim.notify` replay from threads,
   `git.changed_lines` on a worker thread, and **per-call callback slots**
@@ -70,6 +70,11 @@ All issues discussed are grouped into **four problem domains**:
   notes on non-atomic hubs. See doc 07 §2.6.1b and its status banner.
 - **Doc 04 (sync bus):** core done, diff-cache invalidation wired (session start,
   pull, submit), and refresh routed through the bus rather than bypassing it.
+- **Doc 14 (Sign + Float UI):** stacked reply float, `K` keymap to open the thread
+  view, opt-in `CursorHold` hover, `ui.layout = "float"` actually honored, rich
+  EOL preview (`@author: "…" (+N replies) (M draft) (Resolved)`), and shared
+  `ui/completion.lua` module used by both the scratchpad and the reply float
+  (`@mention`, `!`/`#` MR-PR link refs, `<C-g>` suggestion block insertion).
 - **New since these plans were written (no design doc yet):**
   - **Offline issue tracker cache** (`issues` + `issue_notes` tables, FTS5,
     sequential page driver with progress, `:LocalReviewIssues` / `:LocalReviewIssue`
@@ -87,6 +92,22 @@ All issues discussed are grouped into **four problem domains**:
     (endpoint/argument shape) that the mock-based tier structurally cannot see.
   - **argv redaction** (`base.redact_argv`) so command lines reaching logs or
     error notifications never carry a token or a full comment body.
+  - **`gitlab.fetch_discussions --paginate`** — GitLab's discussions endpoint
+    defaults to 20 rows; without `--paginate`, an MR with more than 20 discussions
+    silently dropped the tail, so a new reply past page 1 was invisible to
+    `:LocalReviewPull` even though the local cache "looked right". Now matches
+    how `list_users` already paginated.
+  - **`storage.attach_db(db)` for workers** — every `uv.new_work` `*_thread`
+    function opens its own `sqlite.new` connection, but until now the module
+    global `M.db` stayed nil on the worker, so `storage.query`/`execute` fell
+    through to `open_raw` → `vim.fn.fnamemodify` (nil on threads). Doc 09 §7.5
+    called this out; it now lands. Also fixes the main-thread no-op guard so
+    tests calling `*_thread` directly still use the pre-existing connection.
+  - **`detail_editor` buffer reuse** — `lreview_detail://provider/n` was
+    recreating a buffer with the same name when a hidden one existed, hitting
+    `E95` and leaving `buftype` unset (which then made Neovim fs_watch a bogus
+    `lreview_detail:` file path). Now reuses the hidden buffer, sets buftype
+    before the name, and clears the BufWriteCmd augroup on reopen.
 
 ## Recommended Implementation Order
 

@@ -247,12 +247,34 @@ All failure handling already exists in the submit/outbox layer. The reply float 
 
 ## 11. Implementation Order
 
+Executed in this order across the branch:
+
 1. Add `decor` require, `M.reply_state`, `uuid()`, `t_id_at_cursor()`, `M.close_reply()`, `M.open_reply_float()` to `thread_view.lua`.
 2. Wire `r` keymap + `handle_action("reply")` to `M.open_reply_float()`.
 3. Update `M.close()` to close the reply float.
 4. Run `just test` (offline unit tier) — `test_thread.lua`, `test_mappers.lua`, `test_submit_contract.lua`.
 5. Manual sanity: open thread view on a commented line, press `r`, type reply, `<C-s>`, verify draft appears; `:LocalReviewSubmit` pushes it.
+6. Extract completion + suggestion into `ui/completion.lua`; attach from both the scratchpad and the reply float.
+7. Add `ui.reply_layout` toggle and `submit_immediately` support in the float; auto-grow height.
+8. Rewrite the EOL preview in `decor.lua` for the `@author: "…" (+N replies)` form.
+9. Wire `K` to `thread_view.show` and add optional `CursorHold` autocmd under `ui.hover_open`.
+10. Honor `ui.layout = "float"` for the thread view (was silently coerced to `"split"`).
 
 ---
 
-*Modelled on docs/design/NN-*.md conventions: status banner → domain/depends → problem → current state → proposed solution → threading → lifecycle → failure modes → implementation sketch → verification → risks → open questions → order.*
+## 12. Shipped Surface
+
+| Feature | Where | Notes |
+|---|---|---|
+| Stacked reply float | `lua/lreview/ui/thread_view.lua` `M.open_reply_float(t_id)` | Anchor `relative = "cursor"` or `"win"` depending on whether the thread window is current; auto-grow via `fit_height()`; `ui.reply_layout` toggle |
+| Thread view float layout | `lua/lreview/ui/thread_view.lua` `M.show(bufnr, rel_path, line)` | Computes width/height from `ui.float.width`/`height` (fraction or absolute); flips above/below the cursor based on available rows; anchors via `m_win_position` helper (handles both `nvim_win_get_position` conventions — two values in stock Neovim, `{row, col}` table in the zig-forked dev build) |
+| Rich EOL preview | `lua/lreview/ui/decor.lua` `M.refresh(bufnr)` | `@author: "…" (+N replies) (M draft) (Resolved)`; snippet truncated with `vim.fn.strcharpart` (multibyte-safe); reply count = `total_comments - #ts` |
+| K keymap to open thread | `lua/lreview/ui/decor.lua` `_wire_open(bufnr)` / `_unwire_open(bufnr)` | Called from `enable`/`disable`/`toggle`; removes keymap + augroup on disable |
+| `CursorHold` hover (opt-in) | `lua/lreview/ui/decor.lua` `_wire_open` | Only when `ui.hover_open = true`; guarded by `M.state.winid` validity so the fast-path reopen doesn't fire against a stale window |
+| Shared completion module | `lua/lreview/ui/completion.lua` `attach(buf)`, `insert_suggestion(buf, win, lines)` | `@mention` + MR/PR link + `<C-g>` code-suggestion; used by both `editor.create_scratchpad` and `thread_view.open_reply_float` |
+| Thread view state fast-path fix | `lua/lreview/ui/thread_view.lua` `M.show` early-return | Only short-circuits to `nvim_set_current_win` + `redraw` when `M.state.winid` is still valid; falls through to a full reopen if the window was closed externally. Fixes "K only opens once". |
+| Deferred outbox integration | existing `review.build_ops` → `push_ops` (`REPLY` op) | No new code — draft replies written via `comments.add_comment(STATE.DRAFT)` flow through the same path as `editor.open_reply()`'s deferred mode |
+
+---
+
+*Modelled on docs/design/NN-*.md conventions: status banner → domain/depends → problem → current state → proposed solution → threading → lifecycle → failure modes → implementation sketch → verification → risks → follow-ups → order → shipped surface.*

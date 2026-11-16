@@ -128,6 +128,7 @@ sequenceDiagram
 ## Features
 
 - **Offline-First Workflow:** Save draft comments locally instantly; publish them all in a single batch once you finish the review.
+- **Sign + Floating Window Review UI:** A gutter sign (`💬` / `●` / `✔`) plus an EOL preview (`@author: "…" (+N replies)`) marks commented lines without shifting the code. `K` opens the thread view as a cursor-anchored float; `r` inside it opens a stacked reply float beneath, so the conversation stays visible while you type. Zero layout shift, real markdown rendering, no `virt_lines` crowding.
 - **Idempotent Submit (outbox):** every pending mutation is one `push_ops` row. Each row is committed the moment its call succeeds, so a half-failed submit never re-posts what already landed, and nothing can be stranded in a state you cannot push. Re-run `:LocalReviewSubmit` to retry exactly what is left.
 - **Asynchronous Engine:** Background pulling and pushing run on `uv.new_work` worker threads, so Neovim never freezes on a network request. Issue lists are paged sequentially with progress, also off the UI thread.
 - **Unified Adapter Structure:** Handles both GitLab Merge Requests and GitHub Pull Requests with a single unified set of commands and UI. Platform differences that cannot be abstracted (batch vs per-note creation, verdict delivery) are declared as adapter capability flags rather than guessed.
@@ -201,22 +202,28 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
 ## Usage Workflow
 
 ### 1. Enable Review Highlights
-Run `:LocalReviewToggle` (or press `<leader>ot`) in a repository. The plugin automatically and lazily resolves the git branch target MR/PR, queries the API, opens the SQLite database, and syncs all remote discussions to SQLite under the hood.
+Run `:LocalReviewToggle` (or press `<leader>ot`) in a repository. The plugin automatically and lazily resolves the git branch target MR/PR, queries the API, opens the SQLite database, and syncs all remote discussions to SQLite under the hood. Lines with discussions get a gutter sign (`💬` draft / `●` synced / `✔` resolved) and an EOL preview (`@author: "…" (+N replies)`).
 
 ### 2. Browse & Annotate code
-* **View Comments:** Hover your cursor over a line marked with comments. The comments panel will open automatically showing the discussion thread.
-* **Add a Comment:** Make a visual selection of code lines and run `:LocalReviewComment` (or press `<leader>oc`). Write your comment and save with `:w` or `<leader>s` (automatically closes and caches it as a draft).
+* **View Comments:** Place the cursor on a marked line and press `K` (or run `:LocalReviewOpen` / `:LocalReviewHover`) to open the thread view. Enable `ui.hover_open = true` in setup opts if you want passive hover-open on `CursorHold`.
+* **Add a Comment:** Make a visual selection of code lines and run `:LocalReviewComment` (or press `<leader>oc`). Write your comment and save with `:w` or `<C-s>` — it's cached as a local draft instantly, no network round-trip.
 
-### 3. Manage Conversations (Floating Panel)
-Press `K` or hover to focus the thread panel. Use these buffer-local keys:
-* `r`: Reply to the thread (opens a scratchpad).
-* `e`: Edit your local draft comment.
-* `d`: Delete your local draft comment.
-* `s`: Toggle Resolved/Reopened thread state.
-* `q` / `<esc>`: Close the thread view.
+### 3. Manage Conversations (Sign + Floating Window)
+Pressing `K` opens the thread view as a **floating window anchored to the cursor line** (or a bottom split when `ui.layout = "split"`). Inside that window, these buffer-local keys apply:
+
+| Key | Action |
+|:----|:-------|
+| `r` | Reply — opens a **stacked reply float** docked beneath the thread window; type, then `<C-s>` (or `<CR>`) to save as a local draft. `@mention` and `!`/`#` MR-PR link completion are active while typing; `<C-g>` inserts a `suggestion` block from the thread's code range. |
+| `e` | Edit your local draft comment (opens the scratchpad). |
+| `d` | Delete your local draft comment (or mark a synced one for deletion). |
+| `s` | Toggle Resolved / Reopened on the remote (async). |
+| `P` | Push all pending drafts (equivalent to `:LocalReviewSubmit`). |
+| `q` / `<esc>` | Close the thread view. |
+
+The reply float stays clear of the code: nothing below the commented line shifts, and multi-line replies auto-grow the input box (4 → 12 rows).
 
 ### 4. Submit Staged Drafts
-Once you finish your review, run `:LocalReviewSubmit` (or `<leader>os`) to batch push all local drafts to the remote platform.
+Once you finish your review, run `:LocalReviewSubmit` (or `<leader>os`) to batch push all local drafts to the remote platform. Every mutation is one `push_ops` row; a partial failure leaves the unpushed ones queued and safely re-runnable.
 
 ---
 
@@ -260,13 +267,14 @@ require("lreview").setup({
       keep_days = 30, -- Garbage collect reviews older than 30 days
     },
     ui = {
-      decor = "both",
-      layout = "float", -- "float" | "split" | "vsplit" | "buffer"
-      reply_layout = "stacked", -- "stacked" | "scratchpad"
+      decor = "both", -- "sign" | "virtual_text" | "both" | "none"
+      layout = "float", -- thread view surface: "float" | "split" | "vsplit" | "buffer"
+      reply_layout = "stacked", -- reply surface: "stacked" | "scratchpad"
+      hover_open = false, -- auto-open thread view on CursorHold
       float = {
         border = "rounded",
-        width = 0.5, -- Floating window width (percentage of editor)
-        height = 0.6, -- Floating window height (percentage of editor)
+        width = 0.5, -- Floating window width (fraction of editor if <=1, else cells)
+        height = 0.6, -- Floating window height (fraction of editor if <=1, else cells)
       },
       split = {
         position = "botright",
@@ -288,14 +296,24 @@ require("lreview").setup({
 
 ## Gutter Line Highlights & Customization
 
-The plugin highlights gutter line numbers and signs to represent review statuses and code changes. These are linked to standard Vim groups by default so they match your theme automatically, but you can override them in your configuration:
+The plugin highlights gutter line numbers and signs to represent review statuses and code changes, plus an EOL `virt_text` preview. These are linked to standard Vim groups by default so they match your theme automatically, but you can override them in your configuration:
 
 * `LReviewSignDraft` (Default: `WarningMsg` link) - Sign column indicator for draft comment threads.
 * `LReviewSignSynced` (Default: `Comment` link) - Sign column indicator for active remote threads.
+* `LReviewVirtTextDraft` (Default: `WarningMsg` link) - EOL preview color when a thread contains drafts.
+* `LReviewVirtTextSynced` (Default: `Comment` link) - EOL preview color for synced threads.
 * `LReviewNumDraft` (Default: `DiffChange` link) - Gutter line number background highlight for drafts.
 * `LReviewNumSynced` (Default: `DiffAdd` link) - Gutter line number background highlight for active threads.
 * `LReviewNumResolved` (Default: `Comment` link) - Gutter line number background highlight for resolved threads.
 * `LReviewDiffAdd` (Default: `DiffAdd` link) - Gutter line number background highlight for git diff changes.
+
+The EOL preview itself renders in three shapes:
+
+| Line has | Preview shows |
+|---|---|
+| One thread | `@<author>: "<first-comment snippet, 45 chars>" (+N replies) (M draft) (Resolved)` |
+| Multiple threads | `N threads (M comments) (+R replies)` |
+| Fully resolved | Preview dims to the `Comment` group and gains a `(Resolved)` suffix |
 
 ---
 
