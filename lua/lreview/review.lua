@@ -847,6 +847,12 @@ function M.submit_review_thread(db_path, lazy_sqlite, args)
   local db = sqlite.new(db_path, { keep_open = true })
   db:eval("PRAGMA journal_mode=WAL;")
   db:eval("PRAGMA busy_timeout=5000;")
+  -- Worker threads must skip `ensure_db()` → `open_raw()` → `vim.fn` (nil on
+  -- `uv.new_work` per doc 09 §2.5). Attaching this connection lets
+  -- `storage.query`/`execute` and the outbox/comments CRUD modules use it
+  -- directly. This is doc 09 §7.5's "target a specific connection" fix,
+  -- landed on the module-local side so callers stay unchanged.
+  storage.attach_db(db)
 
   local old_current = M.current
   if args and args.cwd and args.detail then
@@ -1299,6 +1305,12 @@ function M.sync_review_thread(db_path, lazy_sqlite, args)
   local db = sqlite.new(db_path, { keep_open = true })
   db:eval("PRAGMA journal_mode=WAL;")
   db:eval("PRAGMA busy_timeout=5000;")
+  -- Worker threads must skip `ensure_db()` → `open_raw()` → `vim.fn` (nil on
+  -- `uv.new_work` per doc 09 §2.5). Attaching this connection lets
+  -- `storage.query`/`execute` and the outbox/comments CRUD modules use it
+  -- directly. This is doc 09 §7.5's "target a specific connection" fix,
+  -- landed on the module-local side so callers stay unchanged.
+  storage.attach_db(db)
 
   local old_current = M.current
   if args and args.cwd and args.detail then
@@ -1390,6 +1402,12 @@ function M.close_review_thread(db_path, lazy_sqlite, args)
   local db = sqlite.new(db_path, { keep_open = true })
   db:eval("PRAGMA journal_mode=WAL;")
   db:eval("PRAGMA busy_timeout=5000;")
+  -- Worker threads must skip `ensure_db()` → `open_raw()` → `vim.fn` (nil on
+  -- `uv.new_work` per doc 09 §2.5). Attaching this connection lets
+  -- `storage.query`/`execute` and the outbox/comments CRUD modules use it
+  -- directly. This is doc 09 §7.5's "target a specific connection" fix,
+  -- landed on the module-local side so callers stay unchanged.
+  storage.attach_db(db)
 
   local old_current = M.current
   if args and args.cwd and args.detail then
@@ -1462,6 +1480,12 @@ function M.approve_review_thread(db_path, lazy_sqlite, args)
   local db = sqlite.new(db_path, { keep_open = true })
   db:eval("PRAGMA journal_mode=WAL;")
   db:eval("PRAGMA busy_timeout=5000;")
+  -- Worker threads must skip `ensure_db()` → `open_raw()` → `vim.fn` (nil on
+  -- `uv.new_work` per doc 09 §2.5). Attaching this connection lets
+  -- `storage.query`/`execute` and the outbox/comments CRUD modules use it
+  -- directly. This is doc 09 §7.5's "target a specific connection" fix,
+  -- landed on the module-local side so callers stay unchanged.
+  storage.attach_db(db)
 
   local old_current = M.current
   if args and args.cwd and args.detail then
@@ -1534,6 +1558,12 @@ function M.resolve_thread_thread(db_path, lazy_sqlite, args)
   local db = sqlite.new(db_path, { keep_open = true })
   db:eval("PRAGMA journal_mode=WAL;")
   db:eval("PRAGMA busy_timeout=5000;")
+  -- Worker threads must skip `ensure_db()` → `open_raw()` → `vim.fn` (nil on
+  -- `uv.new_work` per doc 09 §2.5). Attaching this connection lets
+  -- `storage.query`/`execute` and the outbox/comments CRUD modules use it
+  -- directly. This is doc 09 §7.5's "target a specific connection" fix,
+  -- landed on the module-local side so callers stay unchanged.
+  storage.attach_db(db)
 
   local old_current = M.current
   if args and args.cwd and args.detail then
@@ -1612,6 +1642,12 @@ function M.create_review_thread(db_path, lazy_sqlite, args)
   local db = sqlite.new(db_path, { keep_open = true })
   db:eval("PRAGMA journal_mode=WAL;")
   db:eval("PRAGMA busy_timeout=5000;")
+  -- Worker threads must skip `ensure_db()` → `open_raw()` → `vim.fn` (nil on
+  -- `uv.new_work` per doc 09 §2.5). Attaching this connection lets
+  -- `storage.query`/`execute` and the outbox/comments CRUD modules use it
+  -- directly. This is doc 09 §7.5's "target a specific connection" fix,
+  -- landed on the module-local side so callers stay unchanged.
+  storage.attach_db(db)
 
   if args and args.cwd then
     M.current = { cwd = args.cwd, detail = M.current and M.current.detail }
@@ -1658,6 +1694,12 @@ function M.request_reviewers_thread(db_path, lazy_sqlite, args)
   local db = sqlite.new(db_path, { keep_open = true })
   db:eval("PRAGMA journal_mode=WAL;")
   db:eval("PRAGMA busy_timeout=5000;")
+  -- Worker threads must skip `ensure_db()` → `open_raw()` → `vim.fn` (nil on
+  -- `uv.new_work` per doc 09 §2.5). Attaching this connection lets
+  -- `storage.query`/`execute` and the outbox/comments CRUD modules use it
+  -- directly. This is doc 09 §7.5's "target a specific connection" fix,
+  -- landed on the module-local side so callers stay unchanged.
+  storage.attach_db(db)
 
   local old_current = M.current
   if args and args.cwd and args.detail then
@@ -1725,6 +1767,12 @@ function M.update_review_thread(db_path, lazy_sqlite, args)
   local db = sqlite.new(db_path, { keep_open = true })
   db:eval("PRAGMA journal_mode=WAL;")
   db:eval("PRAGMA busy_timeout=5000;")
+  -- Worker threads must skip `ensure_db()` → `open_raw()` → `vim.fn` (nil on
+  -- `uv.new_work` per doc 09 §2.5). Attaching this connection lets
+  -- `storage.query`/`execute` and the outbox/comments CRUD modules use it
+  -- directly. This is doc 09 §7.5's "target a specific connection" fix,
+  -- landed on the module-local side so callers stay unchanged.
+  storage.attach_db(db)
 
   local old_current = M.current
   if args and args.cwd and args.detail then

@@ -35,24 +35,47 @@ end
 ---@param detail lreview.MRDetail
 function M.open(detail)
   local buf_name = "lreview_detail://" .. detail.provider .. "/" .. detail.number
-  
-  -- If buffer is already open, focus it
+
+  -- Find a buffer with this name whether or not it's currently in a window.
+  -- If it exists (even hidden), reuse it — creating a new one and calling
+  -- `nvim_buf_set_name` would E95 because the name is already taken.
+  local existing_bufnr = nil
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_get_name(bufnr) == buf_name then
-      local winids = vim.fn.win_findbuf(bufnr)
-      if #winids > 0 then
-        vim.api.nvim_set_current_win(winids[1])
-        return
-      end
+    if vim.api.nvim_buf_is_valid(bufnr) and vim.api.nvim_buf_get_name(bufnr) == buf_name then
+      existing_bufnr = bufnr
+      break
     end
   end
 
-  -- Create a new buffer
-  local bufnr = vim.api.nvim_create_buf(true, false)
-  vim.api.nvim_buf_set_name(bufnr, buf_name)
-  vim.bo[bufnr].buftype = "acwrite"
-  vim.bo[bufnr].filetype = "markdown"
-  vim.bo[bufnr].bufhidden = "wipe"
+  local bufnr
+  if existing_bufnr then
+    -- Already open in a window? Just focus it and return.
+    local winids = vim.fn.win_findbuf(existing_bufnr)
+    if #winids > 0 then
+      vim.api.nvim_set_current_win(winids[1])
+      return
+    end
+    bufnr = existing_bufnr
+  else
+    bufnr = vim.api.nvim_create_buf(true, false)
+    -- Set buftype *before* the name so any watcher never treats this as a
+    -- plain file path. `acwrite` (plus `bufhidden = wipe`) keeps Neovim from
+    -- registering an fs_watch against the URI.
+    vim.bo[bufnr].buftype = "acwrite"
+    vim.bo[bufnr].filetype = "markdown"
+    vim.bo[bufnr].bufhidden = "wipe"
+    local ok_name, err_name = pcall(vim.api.nvim_buf_set_name, bufnr, buf_name)
+    if not ok_name then
+      -- Someone else grabbed the name in the interim (rare; concurrent :ls).
+      -- Fall back to a scratch-style unique name so we do not error out.
+      pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+      bufnr = vim.api.nvim_create_buf(false, true)
+      vim.bo[bufnr].buftype = "acwrite"
+      vim.bo[bufnr].filetype = "markdown"
+      vim.api.nvim_buf_set_name(bufnr, buf_name .. "-" .. tostring(vim.uv.get_pid()))
+    end
+    vim.bo[bufnr].bufhidden = "wipe"
+  end
 
   -- Format buffer lines
   local lines = {
@@ -80,16 +103,19 @@ function M.open(detail)
     lines[#lines + 1] = ""
   end
 
-  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
-  vim.bo[bufnr].modified = false
-
-  -- Create local BufWriteCmd autocmd to handle saves (:w)
+  -- Only register the BufWriteCmd autocmd once per buffer (avoid stacking on
+  -- every reopen of a reused hidden buffer).
+  local aug_name = "lreview_detail_" .. bufnr
+  if vim.api.nvim_create_augroup then
+    pcall(vim.api.nvim_del_augroup_by_name, aug_name)
+  end
+  local grp = vim.api.nvim_create_augroup(aug_name, { clear = true })
   vim.api.nvim_create_autocmd("BufWriteCmd", {
+    group = grp,
     buffer = bufnr,
     callback = function()
       local title, desc = parse_buffer(bufnr)
       vim.notify("lreview: updating MR details on " .. detail.provider .. "...", vim.log.levels.INFO)
-      
       review.update_review_async(title, desc, detail.number, vim.fn.getcwd(), function(ok, err)
         if not ok then
           vim.notify("lreview: failed to update MR: " .. tostring(err), vim.log.levels.ERROR)
@@ -101,10 +127,18 @@ function M.open(detail)
     end,
   })
 
-  -- Split open the buffer (safely handles headless environments)
-  local ok_split = pcall(vim.cmd, "split")
-  if ok_split then
-    pcall(vim.api.nvim_win_set_buf, 0, bufnr)
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  vim.bo[bufnr].modified = false
+
+  -- Open the buffer in a split (or just focus it if it was reused and hidden).
+  local winids = vim.fn.win_findbuf(bufnr)
+  if #winids > 0 then
+    vim.api.nvim_set_current_win(winids[1])
+  else
+    local ok_split = pcall(vim.cmd, "split")
+    if ok_split then
+      pcall(vim.api.nvim_win_set_buf, 0, bufnr)
+    end
   end
 end
 

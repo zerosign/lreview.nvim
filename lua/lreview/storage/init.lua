@@ -59,6 +59,26 @@ local function ensure_db()
   return M.db
 end
 
+--- Attach an already-open sqlite connection as this module's primary db.
+--- Called at the top of every `uv.new_work` thread function after it opens its
+--- own `sqlite.new(...)`, so `ensure_db()` short-circuits and `open_raw()`
+--- (which uses `vim.fn` — unavailable on worker threads per doc 09 §2.5) is
+--- never entered. Migration is skipped too: the main thread already brought
+--- the schema up to date.
+---
+--- No-op if `M.db` is already set: on worker threads it starts nil (isolated
+--- Lua state), so we attach; on the main thread — e.g. unit tests calling
+--- `*_thread` directly — it's already open and must not be replaced, or the
+--- function's trailing `db:close()` would leave `M.db` pointing at a dead
+--- handle and every subsequent query would fail with `bad parameter`.
+---@param db table  -- a sqlite.db instance (from `sqlite.new`)
+function M.attach_db(db)
+  if M.db then return end
+  M.db = db
+  stmt_mod = require("sqlite.stmt")
+  clib = require("sqlite.defs")
+end
+
 --- Open (or create) the database and run migrations.
 ---@param db_path string|nil
 ---@return boolean ok, string|nil err
