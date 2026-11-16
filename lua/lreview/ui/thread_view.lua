@@ -1,11 +1,14 @@
 local comments = require("lreview.storage.comments")
 local config = require("lreview.config")
 local review = require("lreview.review")
+local decor = require("lreview.ui.decor")
 
 local M = {}
 
 -- Store active view state: { bufnr, winid, line_map, thread_line_map, mo_id, path, line }
 M.state = nil
+-- Active stacked reply float: { bufnr, winid, t_id, thread_winid }
+M.reply_state = nil
 
 local sync = require("lreview.sync")
 sync.subscribe("panel", function()
@@ -16,6 +19,7 @@ end)
 
 --- Close the active thread view if open.
 function M.close()
+  M.close_reply()
   if M.state then
     if M.state.winid and vim.api.nvim_win_is_valid(M.state.winid) then
       vim.api.nvim_win_close(M.state.winid, true)
@@ -96,6 +100,144 @@ local function format_threads_for_line(mo_id, rel_path, line)
   return lines, line_map, thread_line_map
 end
 
+--- Generate a local uuid (v4-ish) for draft comment ids.
+---@return string
+local function uuid()
+  local t = {}
+  for i = 1, 32 do
+    local r = math.random(0, 15)
+    t[i] = string.format("%x", r)
+  end
+  t[13] = "4"
+  t[17] = string.format("%x", math.floor(math.random(8, 11)))
+  return table.concat(t, "", 1, 8) .. "-" .. table.concat(t, "", 9, 12)
+    .. "-" .. table.concat(t, "", 13, 16) .. "-" .. table.concat(t, "", 17, 20)
+    .. "-" .. table.concat(t, "", 21, 32)
+end
+
+--- Resolve the thread id under (or nearest to) the current cursor line.
+---@return string|nil
+local function t_id_at_cursor()
+  if not M.state then
+    return nil
+  end
+  local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
+  local t_id = M.state.thread_line_map[cursor_line]
+
+  -- If cursor is on a non-comment line, search upwards then downwards.
+  if not t_id then
+    for i = cursor_line, 1, -1 do
+      if M.state.thread_line_map[i] then
+        t_id = M.state.thread_line_map[i]
+        break
+      end
+    end
+  end
+  if not t_id then
+    for i = cursor_line, #M.state.thread_line_map do
+      if M.state.thread_line_map[i] then
+        t_id = M.state.thread_line_map[i]
+        break
+      end
+    end
+  end
+  return t_id
+end
+
+--- Close the stacked reply input float if it is open.
+function M.close_reply()
+  if M.reply_state then
+    local rs = M.reply_state
+    if rs.winid and vim.api.nvim_win_is_valid(rs.winid) then
+      vim.api.nvim_win_close(rs.winid, true)
+    end
+    if rs.bufnr and vim.api.nvim_buf_is_valid(rs.bufnr) then
+      pcall(vim.api.nvim_buf_delete, rs.bufnr, { force = true })
+    end
+    M.reply_state = nil
+  end
+end
+
+--- Open a stacked reply input float docked beneath the thread window.
+--- The reply is saved as a local draft comment on <C-s> and pushed later
+--- via :LocalReviewSubmit (outbox REPLY op).
+---@param t_id string
+function M.open_reply_float(t_id)
+  if not M.state then
+    return
+  end
+  M.close_reply()
+
+  local thread_winid = M.state.winid
+  local cur_win = vim.api.nvim_get_current_win()
+  local anchor_win = (thread_winid and vim.api.nvim_win_is_valid(thread_winid)) and thread_winid or cur_win
+  local relative = (anchor_win == cur_win) and "cursor" or "win"
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].filetype = "markdown"
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].bufhidden = "wipe"
+  vim.api.nvim_buf_set_name(buf, "lreview://reply/" .. t_id)
+
+  local opts = { silent = true, noremap = true, buffer = buf }
+  local width = 72
+  local height = 4
+
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = relative,
+    win = (relative == "win") and anchor_win or nil,
+    row = 1,
+    col = 0,
+    width = width,
+    height = height,
+    style = "minimal",
+    border = "rounded",
+    title = " ✍️ Reply ",
+    title_pos = "center",
+  })
+
+  local function submit()
+    local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+    local text = vim.trim(table.concat(lines, "\n"))
+    if text == "" then
+      vim.notify("lreview: reply cannot be empty", vim.log.levels.WARN)
+      return
+    end
+    comments.add_comment({
+      c_id = uuid(),
+      t_id = t_id,
+      remote_id = nil,
+      author = nil,
+      body = text,
+      created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+      in_reply_to = nil,
+    })
+    -- Redraw the thread view so the new draft reply appears immediately.
+    M.redraw()
+    local bufnr = vim.fn.bufnr(M.state.path)
+    if bufnr ~= -1 then
+      decor.refresh(bufnr)
+    end
+    vim.notify("lreview: reply added as draft (push with :LocalReviewSubmit)", vim.log.levels.INFO)
+    M.close_reply()
+  end
+
+  local function cancel()
+    M.close_reply()
+  end
+
+  vim.keymap.set({ "n", "i" }, "<C-s>", submit, opts)
+  vim.keymap.set({ "n", "i" }, "<C-cr>", submit, opts)
+  vim.keymap.set("n", "q", cancel, opts)
+  vim.keymap.set("n", "<esc>", cancel, opts)
+  vim.keymap.set({ "n", "i" }, "<C-c>", cancel, opts)
+
+  -- Start in insert mode so the user can type immediately.
+  vim.cmd("startinsert")
+
+  M.reply_state = { bufnr = buf, winid = win, t_id = t_id, thread_winid = thread_winid }
+end
+
 --- Draw/redraw the current thread view buffer.
 function M.redraw()
   if not M.state or not vim.api.nvim_buf_is_valid(M.state.bufnr) then
@@ -145,7 +287,9 @@ local function handle_action(action)
   end
 
   if action == "reply" then
-    require("lreview.ui.editor").open_reply(t_id)
+    if t_id then
+      M.open_reply_float(t_id)
+    end
   elseif action == "edit" then
     if not c_id then
       vim.notify("lreview: move cursor onto a comment to edit it", vim.log.levels.WARN)
@@ -282,7 +426,14 @@ function M.show(bufnr, rel_path, line)
     local opts = { silent = true, noremap = true, buffer = buf }
     vim.keymap.set("n", "q", function() M.close() end, opts)
     vim.keymap.set("n", "<esc>", function() M.close() end, opts)
-    vim.keymap.set("n", "r", function() handle_action("reply") end, opts)
+    vim.keymap.set("n", "r", function()
+      local t_id = t_id_at_cursor()
+      if t_id then
+        M.open_reply_float(t_id)
+      else
+        vim.notify("lreview: move cursor into a thread block to reply", vim.log.levels.WARN)
+      end
+    end, opts)
     vim.keymap.set("n", "e", function() handle_action("edit") end, opts)
     vim.keymap.set("n", "d", function() handle_action("delete") end, opts)
     vim.keymap.set("n", "s", function() handle_action("resolve") end, opts)

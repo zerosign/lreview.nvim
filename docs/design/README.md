@@ -24,6 +24,7 @@ All issues discussed are grouped into **four problem domains**:
 | [02-file-overview.md](02-file-overview.md) | File-list overview, minimal & non-invasive | A 2 |
 | [03-review-verdict.md](03-review-verdict.md) | Review verdict (approve/request-changes) + popup confirmation, multiplatform | A 6 |
 | [04-sync-bus.md](04-sync-bus.md) | Centralized panel/status sync, efficient propagation, keymap conflict | A 7 |
+| [14-ui-sign-float-thread.md](14-ui-sign-float-thread.md) | Sign + floating window thread UI with stacked reply float (State 3) | A 8 |
 
 ### Domain 3 — Requesting Review UX (Journey B)
 *The author's per-step experience.*
