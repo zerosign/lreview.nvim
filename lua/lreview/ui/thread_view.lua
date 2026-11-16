@@ -464,13 +464,35 @@ end
 ---@param line integer
 function M.show(bufnr, rel_path, line)
   if not review.current then
+    vim.notify("lreview: no active review; run :LocalReviewToggle first", vim.log.levels.WARN)
     return
   end
   local mo_id = review.current.detail.mo_id
   local threads = comments.threads_for_buffer(mo_id, rel_path, line)
 
   if #threads == 0 then
-    -- Clean close if no threads present.
+    -- Diagnostics: this path used to be silent, so a path/mo_id mismatch or
+    -- simply being on an uncommented line looked identical. Print what was
+    -- queried so it's obvious which case you're in.
+    local all_on_path = comments.threads_for_buffer(mo_id, rel_path, nil)
+    if #all_on_path == 0 then
+      vim.notify(
+        string.format(
+          "lreview: no threads on this path. mo_id=%s path=%s (cursor line=%d; check with :LocalReviewSummary if this MR has threads on other files)",
+          tostring(mo_id), tostring(rel_path), line),
+        vim.log.levels.INFO)
+    else
+      local hint = {}
+      for i, t in ipairs(all_on_path) do
+        if i > 5 then hint[#hint + 1] = "…"; break end
+        hint[#hint + 1] = string.format("%d:%d", t.start_line or 0, t.end_line or t.start_line or 0)
+      end
+      vim.notify(
+        string.format(
+          "lreview: cursor line %d is not inside any thread range on %s (thread ranges: %s)",
+          line, tostring(rel_path), table.concat(hint, ", ")),
+        vim.log.levels.INFO)
+    end
     M.close()
     return
   end

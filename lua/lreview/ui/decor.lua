@@ -213,6 +213,7 @@ function M.enable(bufnr)
   if not M.enabled_buffers[bufnr] then
     M.enabled_buffers[bufnr] = true
     M.refresh(bufnr)
+    M._wire_open(bufnr)
   end
 end
 
@@ -221,8 +222,7 @@ end
 function M.disable(bufnr)
   if M.enabled_buffers[bufnr] then
     M.clear(bufnr)
-    local grp_name = "lreview_hover_" .. bufnr
-    pcall(vim.api.nvim_del_augroup_by_name, grp_name)
+    M._unwire_open(bufnr)
     M.enabled_buffers[bufnr] = nil
   end
 end
@@ -231,20 +231,65 @@ end
 ---@param bufnr integer|nil
 function M.toggle(bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf()
-  local grp_name = "lreview_hover_" .. bufnr
   if M.enabled_buffers[bufnr] then
     M.clear(bufnr)
-    pcall(vim.api.nvim_del_augroup_by_name, grp_name)
+    M._unwire_open(bufnr)
     M.enabled_buffers[bufnr] = nil
     vim.notify("lreview: review highlights disabled", vim.log.levels.INFO)
   else
     M.enabled_buffers[bufnr] = true
     M.refresh(bufnr)
-
-
-
+    M._wire_open(bufnr)
     vim.notify("lreview: review highlights enabled", vim.log.levels.INFO)
   end
+end
+
+--- Install the `K` keymap (and optional `CursorHold` autocmd) for a buffer.
+--- Idempotent. `ui.hover_open = true` in setup opts turns the passive hover
+--- behavior on; the `K` keymap is always installed and does not conflict with
+--- LSP hover (which most users bind to `<C-k>` or a different leader).
+---@param bufnr integer
+function M._wire_open(bufnr)
+  if not vim.api.nvim_buf_is_valid(bufnr) then return end
+  local thread_view = require("lreview.ui.thread_view")
+
+  vim.keymap.set("n", "K", function()
+    if not review.current then return end
+    local abs = vim.api.nvim_buf_get_name(bufnr)
+    local root = review.current.cwd
+    if root and abs:sub(1, #root) == #root and abs:sub(#root + 1, #root + 1) == "/" then
+      abs = abs:sub(#root + 2)
+    end
+    local line = vim.api.nvim_win_get_cursor(0)[1]
+    thread_view.show(bufnr, abs, line)
+  end, { silent = true, noremap = true, buffer = bufnr, desc = "lreview: open thread" })
+
+  local ui_cfg = (require("lreview.config").get_defaults().ui or {})
+  if ui_cfg.hover_open == true then
+    local grp = vim.api.nvim_create_augroup("lreview_hover_" .. bufnr, { clear = true })
+    vim.api.nvim_create_autocmd("CursorHold", {
+      group = grp,
+      buffer = bufnr,
+      callback = function()
+        if not review.current then return end
+        local rel = get_rel_path(bufnr)
+        if not rel then return end
+        local line = vim.api.nvim_win_get_cursor(0)[1]
+        local threads = comments.threads_for_buffer(review.current.detail.mo_id, rel, line)
+        if #threads > 0 then
+          thread_view.show(bufnr, rel, line)
+        end
+      end,
+    })
+  end
+end
+
+--- Remove the keymaps/autocmds installed by `_wire_open`.
+---@param bufnr integer
+function M._unwire_open(bufnr)
+  pcall(vim.keymap.del, "n", "K", { buffer = bufnr })
+  local grp_name = "lreview_hover_" .. bufnr
+  pcall(vim.api.nvim_del_augroup_by_name, grp_name)
 end
 
 --- Get all lines in the active buffer that have discussion threads.
