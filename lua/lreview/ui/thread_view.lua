@@ -497,11 +497,24 @@ function M.show(bufnr, rel_path, line)
     return
   end
 
-  -- If already viewing this line, focus it (if already visible), redraw, and return.
-  if M.state and M.state.path == rel_path and M.state.line == line and vim.api.nvim_buf_is_valid(M.state.bufnr) then
-    if M.state.winid and vim.api.nvim_win_is_valid(M.state.winid) then
-      vim.api.nvim_set_current_win(M.state.winid)
-    end
+  -- Always anchor to the CURRENT window's cursor — `M.show` is only invoked
+  -- from a code buffer context (K keymap, :LocalReviewOpen, next/prev thread
+  -- jump). A previously-saved source_win would go stale when the user moves
+  -- to a different code buffer.
+  local source_win = vim.api.nvim_get_current_win()
+
+  -- Fast path: the SAME line's thread view is already open AND its window is
+  -- still on screen. Focus it and redraw in place. If the window was closed
+  -- externally (`<C-w>c`, `:close`, mouse click-away, buffer wipe), the fast
+  -- path's redraw would touch a hidden buffer and nothing would appear — fall
+  -- through to a full reopen instead. This used to be the source of "K only
+  -- works once" reports.
+  local win_still_valid = M.state
+      and M.state.winid
+      and vim.api.nvim_win_is_valid(M.state.winid)
+  if M.state and M.state.path == rel_path and M.state.line == line
+      and vim.api.nvim_buf_is_valid(M.state.bufnr) and win_still_valid then
+    vim.api.nvim_set_current_win(M.state.winid)
     M.redraw()
     return
   end
@@ -539,11 +552,13 @@ function M.show(bufnr, rel_path, line)
   M.state = {
     bufnr = buf,
     winid = nil,
+    source_win = source_win,
     line_map = {},
     thread_line_map = {},
     mo_id = mo_id,
     path = rel_path,
     line = line,
+    layout = nil,
   }
 
   M.redraw()
@@ -551,24 +566,72 @@ function M.show(bufnr, rel_path, line)
   -- Retrieve layout configuration
   local ui_cfg = config.get_defaults().ui or {}
   local layout = ui_cfg.layout or "split"
-  if layout == "float" then
-    layout = "split"
-  end
   local winid
 
-  if layout == "split" or layout == "vsplit" then
-    local split_pos = ui_cfg.split and ui_cfg.split.position or "botright"
-    local default_size = (layout == "vsplit") and 50 or 15
-    local split_size = (ui_cfg.split and ui_cfg.split.size) and ui_cfg.split.size or default_size
-    local split_cmd = (layout == "vsplit") and "vnew" or "new"
+  if layout == "float" then
+    -- Honor `ui.layout = "float"` — the previous code silently coerced this to
+    -- "split" with the comment "layout = split", so users configuring float
+    -- got no float. Now: compute width/height from `ui.float.width`/`height`
+    -- (fraction of the editor, or absolute integer), pick a row above or
+    -- below the cursor depending on available space, and open the window.
+    local float_cfg = ui_cfg.float or {}
+    local raw_w = float_cfg.width or 0.7
+    local raw_h = float_cfg.height or 0.5
+    local width = (raw_w <= 1) and math.floor(vim.o.columns * raw_w) or raw_w
+    local height = (raw_h <= 1) and math.floor(vim.o.lines * raw_h) or raw_h
+    width = math.max(60, math.min(vim.o.columns - 2, width))
+    height = math.max(6, math.min(vim.o.lines - 2, height))
 
-    vim.cmd(string.format("silent %s %d%s", split_pos, split_size, split_cmd))
-    winid = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(winid, buf)
+    -- Focus the source window so `relative = "cursor"` anchors there, then
+    -- flip to `relative = "editor"` for absolute positioning (the row calc
+    -- needs to know where the cursor sits in the outer editor, not just in
+    -- the current window).
+    if vim.api.nvim_win_is_valid(source_win) then
+      pcall(vim.api.nvim_set_current_win, source_win)
+    end
+    local win_row, win_col = vim.api.nvim_win_get_position(source_win)
+    local cursor_row = vim.api.nvim_win_get_cursor(source_win)[1] - 1
+
+    local rows_below = (win_row + vim.api.nvim_win_get_height(source_win)) - cursor_row
+    local row
+    if rows_below >= height + 3 then
+      row = cursor_row + 1
+    elseif cursor_row > height + 1 then
+      row = cursor_row - height - 1
+    else
+      row = math.max(0, math.floor((vim.o.lines - height) / 2))
+    end
+    local col = math.max(0, win_col + math.floor((vim.api.nvim_win_get_width(source_win) - width) / 2))
+
+    winid = vim.api.nvim_open_win(buf, true, {
+      relative = "editor",
+      row = row,
+      col = col,
+      width = width,
+      height = height,
+      style = "minimal",
+      border = float_cfg.border or "rounded",
+      title = string.format(" Review Thread (%s:%d) ", rel_path, line),
+      title_pos = "center",
+      zindex = 50,
+    })
+    M.state.layout = "float"
   else
-    -- Full buffer layout: open in current window
-    winid = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(winid, buf)
+    M.state.layout = layout
+    if layout == "split" or layout == "vsplit" then
+      local split_pos = ui_cfg.split and ui_cfg.split.position or "botright"
+      local default_size = (layout == "vsplit") and 50 or 15
+      local split_size = (ui_cfg.split and ui_cfg.split.size) and ui_cfg.split.size or default_size
+      local split_cmd = (layout == "vsplit") and "vnew" or "new"
+
+      vim.cmd(string.format("silent %s %d%s", split_pos, split_size, split_cmd))
+      winid = vim.api.nvim_get_current_win()
+      vim.api.nvim_win_set_buf(winid, buf)
+    else
+      -- Full buffer layout: open in current window
+      winid = vim.api.nvim_get_current_win()
+      vim.api.nvim_win_set_buf(winid, buf)
+    end
   end
 
   M.state.winid = winid
