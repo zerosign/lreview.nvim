@@ -1,6 +1,6 @@
 # 14 — Sign + Floating Window Thread UI with Stacked Reply Float
 
-**Status:** 🚧 **Implemented** — core stacked reply float + autocomplete + auto-grow height + `submit_immediately` + `ui.reply_layout` toggle. Follow-up (reply count in EOL preview) open.
+**Status:** ✅ **Implemented** — stacked reply float, shared `ui.completion` module, feature parity with scratchpad (`reply_layout` toggle, `submit_immediately`, auto-grow height, `@mention` + MR/PR link + `<C-g>` code suggestion), and rich EOL preview in `decor.lua` (`@author: "snippet" (+N replies)`).
 **Domain:** 2 — Reviewing UX (Journey A)
 **Depends on:** 09-async-model.md (uv.new_work thread model), 07-submit-atomicity.md (outbox push_ops)
 **Related:** 02-file-overview.md (summary panel), 03-review-verdict.md (confirm popup), 04-sync-bus.md (debounced refresh)
@@ -238,8 +238,10 @@ All failure handling already exists in the submit/outbox layer. The reply float 
 3. ✅ **Immediate submit from the float** — implemented. When `submit_immediately = true`, the
    float's `submit()` calls `review.push_reply_immediately(t_id, text)` instead of drafting —
    the same path `editor.open_reply()` takes in immediate mode.
-4. ⏳ **`virt_text` preview includes reply count** — `decor.lua` already shows `(N draft)` but
-   not total reply count. Enhance `virt_text_str` to also show `+N replies`.
+4. ✅ **`virt_text` preview includes reply count** — implemented. Single-thread lines now show
+   `@<author>: "<first-comment snippet>"` (45-char, multibyte-safe truncate) followed by
+   `(+N replies)`, `(M draft)`, `(Resolved)` suffixes as before. Multi-thread lines keep the
+   aggregate `N threads (M comments)` form. Reply count = `total_comments - #threads`.
 
 ---
 

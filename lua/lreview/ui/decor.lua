@@ -134,13 +134,38 @@ function M.refresh(bufnr)
     local num_hl = all_resolved and "LReviewNumResolved" or (any_draft and "LReviewNumDraft" or "LReviewNumSynced")
     local sign_text = all_resolved and "✔" or (any_draft and "💬" or "●")
 
-    local virt_text_str = ""
-    if #ts > 1 then
-      virt_text_str = string.format("   %d threads (%d comments)", #ts, total_comments)
+    -- Each thread has exactly 1 root comment; the rest are replies. Total
+    -- replies on this line = total_comments - #ts.
+    local reply_count = total_comments - #ts
+
+    -- Base preview. Single-thread lines get a rich snippet (`@author: "…"`),
+    -- which is what most reviews look like. Multi-thread lines keep the
+    -- aggregate form so the preview never overflows the editor.
+    local virt_text_str
+    if #ts == 1 then
+      local first_thread = ts[1]
+      local first_comment = first_thread.comments[1]
+      if first_comment then
+        local author = first_comment.author or "me"
+        local body = (first_comment.body or ""):gsub("[\r\n]+", " ")
+        -- Truncate at 45 chars (multibyte-safe via strcharpart) so the EOL
+        -- preview stays subtle. Longer bodies end with `…`.
+        local max_chars = 45
+        if vim.fn.strchars(body) > max_chars then
+          body = vim.fn.strcharpart(body, 0, max_chars) .. "…"
+        end
+        virt_text_str = string.format('   @%s: "%s"', author, body)
+      else
+        virt_text_str = "   (empty thread)"
+      end
     else
-      virt_text_str = string.format("   %d comment(s)", total_comments)
+      virt_text_str = string.format("   %d threads (%d comments)", #ts, total_comments)
     end
 
+    if reply_count > 0 then
+      local noun = (reply_count == 1) and "reply" or "replies"
+      virt_text_str = virt_text_str .. string.format(" (+%d %s)", reply_count, noun)
+    end
     if draft_count > 0 then
       virt_text_str = virt_text_str .. " (" .. draft_count .. " draft)"
     end
