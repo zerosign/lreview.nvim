@@ -260,8 +260,9 @@ require("lreview").setup({
       keep_days = 30, -- Garbage collect reviews older than 30 days
     },
     ui = {
-      decor = "both", -- Annotation style: "sign" | "virtual_text" | "both" | "none"
-      layout = "float", -- Float style: "float" | "split" | "vsplit" | "buffer"
+      decor = "both",
+      layout = "float", -- "float" | "split" | "vsplit" | "buffer"
+      reply_layout = "stacked", -- "stacked" | "scratchpad"
       float = {
         border = "rounded",
         width = 0.5, -- Floating window width (percentage of editor)

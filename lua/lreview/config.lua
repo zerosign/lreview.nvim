@@ -38,6 +38,10 @@ M.defaults = {
     decor = "both",               -- "sign" | "virtual_text" | "both" | "none"
     float = { width = 0.5, height = 0.6 },
     layout = "split",             -- "float" | "split" | "vsplit"
+    -- Reply composition surface:
+    --   "stacked"   -- docked float beneath the thread window (default)
+    --   "scratchpad" -- full editor scratchpad via ui.editor.open_reply()
+    reply_layout = "stacked",
   },
   open = { method = "checkout" },
   -- Issue tracker cache (issues are what an MR description usually points at).

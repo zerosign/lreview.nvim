@@ -160,12 +160,20 @@ end
 
 --- Open a stacked reply input float docked beneath the thread window.
 --- The reply is saved as a local draft comment on <C-s> and pushed later
---- via :LocalReviewSubmit (outbox REPLY op).
+--- via :LocalReviewSubmit (outbox REPLY op), unless `submit_immediately`
+--- is configured, in which case the reply is pushed to the hub on save.
+--- If `ui.reply_layout == "scratchpad"`, falls back to `editor.open_reply()`.
 ---@param t_id string
 function M.open_reply_float(t_id)
   if not M.state then
     return
   end
+
+  local ui_cfg = (config.get_defaults().ui or {})
+  if ui_cfg.reply_layout == "scratchpad" then
+    return require("lreview.ui.editor").open_reply(t_id)
+  end
+
   M.close_reply()
 
   local thread_winid = M.state.winid
@@ -181,7 +189,9 @@ function M.open_reply_float(t_id)
 
   local opts = { silent = true, noremap = true, buffer = buf }
   local width = 72
-  local height = 4
+  local min_height = 4
+  local max_height = 12
+  local cur_height = min_height
 
   local win = vim.api.nvim_open_win(buf, true, {
     relative = relative,
@@ -189,18 +199,59 @@ function M.open_reply_float(t_id)
     row = 1,
     col = 0,
     width = width,
-    height = height,
+    height = cur_height,
     style = "minimal",
     border = "rounded",
     title = " ✍️ Reply ",
     title_pos = "center",
   })
 
+  -- Auto-grow/shrink the float to fit content (bounded), so multi-line replies
+  -- stay visible without manual resize.
+  local function fit_height()
+    local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+    local want = #lines
+    -- Also grow if a single line has wrapped, approximating visually.
+    local win_width = width - 2  -- minus borders
+    for _, l in ipairs(lines) do
+      if vim.fn.strdisplaywidth(l) > win_width then want = want + 1 end
+    end
+    want = math.max(min_height, math.min(max_height, want))
+    if want ~= cur_height and vim.api.nvim_win_is_valid(win) then
+      cur_height = want
+      pcall(vim.api.nvim_win_set_height, win, want)
+    end
+  end
+  vim.api.nvim_create_autocmd({ "TextChangedI", "TextChanged" }, {
+    buffer = buf,
+    callback = fit_height,
+  })
+
+  local submit_immediately = (config.get_defaults().submit_immediately == true)
+
   local function submit()
     local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
     local text = vim.trim(table.concat(lines, "\n"))
     if text == "" then
       vim.notify("lreview: reply cannot be empty", vim.log.levels.WARN)
+      return
+    end
+    if submit_immediately then
+      -- Push directly through the same path the scratchpad uses. Close the
+      -- float first so the sync-bus refresh doesn't fight with it.
+      M.close_reply()
+      vim.notify("lreview: submitting reply immediately...", vim.log.levels.INFO)
+      local remote_id, err = review.push_reply_immediately(t_id, text)
+      if not remote_id then
+        vim.notify("lreview: failed to push reply: " .. tostring(err), vim.log.levels.ERROR)
+        return
+      end
+      if M.state and vim.api.nvim_buf_is_valid(M.state.bufnr) then
+        M.redraw()
+        local bufnr = vim.fn.bufnr(M.state.path)
+        if bufnr ~= -1 then decor.refresh(bufnr) end
+      end
+      vim.notify("lreview: reply pushed", vim.log.levels.INFO)
       return
     end
     comments.add_comment({

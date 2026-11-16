@@ -1,6 +1,6 @@
 # 14 — Sign + Floating Window Thread UI with Stacked Reply Float
 
-**Status:** 📋 **Planned — pre-implementation**
+**Status:** 🚧 **Implemented** — core stacked reply float + autocomplete + auto-grow height + `submit_immediately` + `ui.reply_layout` toggle. Follow-up (reply count in EOL preview) open.
 **Domain:** 2 — Reviewing UX (Journey A)
 **Depends on:** 09-async-model.md (uv.new_work thread model), 07-submit-atomicity.md (outbox push_ops)
 **Related:** 02-file-overview.md (summary panel), 03-review-verdict.md (confirm popup), 04-sync-bus.md (debounced refresh)
@@ -227,12 +227,19 @@ All failure handling already exists in the submit/outbox layer. The reply float 
 
 ---
 
-## 10. Open Questions
+## 10. Follow-ups
 
-1. **`ui.reply_layout` toggle?** Offer `stacked` (default) vs `scratchpad` (current `editor.open_reply`) via config. Deferred — stacked is sufficient for v1.
-2. **Multi-line reply box?** Current float is `height = 4` (fixed). A taller/resizable reply box, or a split-within-float (read-only history top + editable bottom), is a natural follow-up.
-3. **Immediate submit from the float?** If `submit_immediately` is set, the float's save could call `push_reply_immediately()` directly instead of drafting. Kept as deferred-only for v1 to match `editor.open_reply()` default.
-4. **`virt_text` preview includes reply count?** `decor.lua` already shows `(N draft)` but not total reply count. Could enhance `virt_text_str` to show `+N replies`.
+1. ✅ **`ui.reply_layout` toggle** — implemented. `reply_layout = "stacked"` (default, docked float)
+   or `"scratchpad"` (falls back to `editor.open_reply()`). Config declared in `config.lua` under
+   `ui`. `open_reply_float` checks the setting before opening the float.
+2. ✅ **Resizable reply float** — implemented. `TextChangedI` / `TextChanged` autocmd calls
+   `fit_height()`, growing the float from `min_height = 4` up to `max_height = 12` to fit the
+   typed content (with an approximate adjustment for visually wrapped lines by display width).
+3. ✅ **Immediate submit from the float** — implemented. When `submit_immediately = true`, the
+   float's `submit()` calls `review.push_reply_immediately(t_id, text)` instead of drafting —
+   the same path `editor.open_reply()` takes in immediate mode.
+4. ⏳ **`virt_text` preview includes reply count** — `decor.lua` already shows `(N draft)` but
+   not total reply count. Enhance `virt_text_str` to also show `+N replies`.
 
 ---
 
