@@ -115,6 +115,22 @@ local function uuid()
     .. "-" .. table.concat(t, "", 21, 32)
 end
 
+--- Resolve the source window's top-left in editor coordinates.
+--- Handles both Neovim API conventions:
+---   * standard Neovim returns two values (row, col)
+---   * the zig-forked dev build (0.13.0-dev+ga705bbe5d4) returns a single
+---     table `{row, col}`
+--- Callers get two integers either way.
+---@param win integer
+---@return integer row, integer col
+local function m_win_position(win)
+  local a, b = vim.api.nvim_win_get_position(win)
+  if type(a) == "table" then
+    return a[1] or 0, a[2] or 0
+  end
+  return a or 0, b or 0
+end
+
 --- Resolve the thread id under (or nearest to) the current cursor line.
 ---@return string|nil
 local function t_id_at_cursor()
@@ -589,7 +605,7 @@ function M.show(bufnr, rel_path, line)
     if vim.api.nvim_win_is_valid(source_win) then
       pcall(vim.api.nvim_set_current_win, source_win)
     end
-    local win_row, win_col = vim.api.nvim_win_get_position(source_win)
+    local win_row, win_col = m_win_position(source_win)
     local cursor_row = vim.api.nvim_win_get_cursor(source_win)[1] - 1
 
     local rows_below = (win_row + vim.api.nvim_win_get_height(source_win)) - cursor_row
