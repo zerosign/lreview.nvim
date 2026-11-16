@@ -152,10 +152,18 @@ end
 ---@param ctx table
 ---@param number integer  -- iid
 ---@return lreview.Thread[]|nil, string|nil
+--- Fetch every discussion (thread) on an MR.
+--- Uses `glab api ... --paginate` so the response is the concatenation of all
+--- pages, not just page 1. GitLab's default page size for this endpoint is 20;
+--- without `--paginate`, an MR with >20 discussions silently drops any note
+--- past the first page — the reason `:LocalReviewPull` missed a fresh reply
+--- on MR #9 that sat on page 2. Matches how `list_users` and GitHub's
+--- `--paginate` paths already work.
 function M.fetch_discussions(cfg, ctx, number)
   local argv = base_argv(cfg, ctx)
   argv[#argv + 1] = "api"
   argv[#argv + 1] = string.format("projects/:fullpath/merge_requests/%d/discussions", number)
+  argv[#argv + 1] = "--paginate"
   local res = base.run(argv, { cwd = ctx.cwd })
   local data, err = base.parse_json(res)
   if not data then
