@@ -76,6 +76,53 @@ function M.dispatch_cb(key, ...)
   return true
 end
 
+local action_workers = {}
+
+--- Run an asynchronous worker task with automatic singleton worker caching and
+--- per-call callback queueing.
+---@param key string  -- e.g. "review.close"
+---@param target_module string
+---@param target_fn string
+---@param payload table
+---@param callback fun(...)|nil
+---@param on_result (fun(res: table)|nil)  -- optional hook run on main thread before callback
+function M.run_task(key, target_module, target_fn, payload, callback, on_result)
+  local worker = action_workers[key]
+  if not worker then
+    worker = M.create_worker(target_module, target_fn, function(res)
+      if on_result then
+        pcall(on_result, res)
+      end
+      M.dispatch_cb(key, res and res.ok, res and res.err or nil, res)
+    end)
+    action_workers[key] = worker
+  end
+
+  M.arm(key, callback)
+  worker:queue(payload)
+end
+
+--- Worker-thread helper: bootstrap SQLite on the worker thread, attach to storage,
+--- invoke `fn(db)`, and ensure the connection is closed cleanly.
+---@param db_path string
+---@param lazy_sqlite string
+---@param fn fun(db: table): table
+---@return table
+function M.with_worker_db(db_path, lazy_sqlite, fn)
+  local sqlite = require("sqlite")
+  local db = sqlite.new(db_path, { keep_open = true })
+  db:eval("PRAGMA journal_mode=WAL;")
+  db:eval("PRAGMA busy_timeout=5000;")
+  local storage = require("lreview.storage")
+  storage.attach_db(db)
+  local ok, res = pcall(fn, db)
+  db:close()
+  if not ok then
+    return { ok = false, err = tostring(res) }
+  end
+  return res or { ok = true }
+end
+
 --- Create a thread worker wrapper that handles environment bootstrap,
 --- dynamic module resolution on the worker thread, MessagePack serialization,
 --- and scheduled callback dispatch.

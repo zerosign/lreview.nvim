@@ -10,6 +10,7 @@
 local adapter = require("lreview.adapter")
 local storage = require("lreview.storage")
 local repo_users = require("lreview.storage.users")
+local thread = require("lreview.thread")
 
 local M = {}
 
@@ -87,44 +88,51 @@ function M.search_users(cwd, query)
   return repo_users.search(repo_key, query)
 end
 
---- Fetch repo users asynchronously in a headless nvim job (non-blocking).
---- The job prints a JSON result { n = count, e = err } to stdout.
+--- Worker thread entry point for pull_users_async.
+---@param db_path string
+---@param lazy_sqlite string
+---@param args table  -- { cwd }
+---@return table
+function M.fetch_users_thread(db_path, lazy_sqlite, args)
+  local resolved = adapter.resolve(args and args.cwd or nil)
+  if not resolved then
+    return { ok = false, err = "no git remote detected" }
+  end
+  local ctx = adapter.ctx(resolved)
+  local users, err = resolved.adapter.list_users(resolved.cfg, ctx)
+  if not users then
+    return { ok = false, err = err }
+  end
+  local repo_key = resolved.provider .. ":" .. resolved.repo
+  return { ok = true, repo_key = repo_key, users = users }
+end
+
+--- Fetch repo users asynchronously via a background worker thread (non-blocking).
 ---@param callback fun(success: boolean, count: integer|nil, err: string|nil)|nil
 ---@return boolean, string|nil
 function M.pull_users_async(callback)
   local cwd = vim.fn.getcwd()
-  local plugin_root = vim.fn.fnamemodify(debug.getinfo(1).source:match("@(.*)$"), ":h:h:h")
-  local cmd = {
-    vim.v.progpath,
-    "--headless",
-    "--cmd",
-    "set runtimepath^=" .. vim.fn.escape(plugin_root, " "),
-    "-c",
-    string.format(
-      "lua local n,e=require('lreview').api.fetch_users(%q); io.write(vim.json.encode({n=n,e=e}))",
-      cwd
-    ),
-    "-c",
-    "qa"
-  }
-  vim.system(cmd, { cwd = cwd, text = true }, function(res)
-    vim.schedule(function()
-      local data = nil
-      if res.stdout then
-        local okd, decoded = pcall(vim.json.decode, res.stdout)
-        if okd then
-          data = decoded
+  thread.run_task(
+    "users.pull",
+    "lreview.users",
+    "fetch_users_thread",
+    { cwd = cwd },
+    callback,
+    function(res, slot_cb)
+      if res and res.ok and res.users then
+        local ok = storage.open()
+        if ok then
+          local now = os.date("!%Y-%m-%dT%H:%M:%SZ")
+          for _, u in ipairs(res.users) do
+            repo_users.upsert(res.repo_key, u, now)
+          end
         end
+        if slot_cb then slot_cb(true, #res.users, nil) end
+      else
+        if slot_cb then slot_cb(false, nil, res and res.err or "failed to fetch repo users") end
       end
-      if callback then
-        if data and data.n ~= nil then
-          callback(true, data.n, nil)
-        else
-          callback(false, nil, data and data.e or "failed to fetch repo users")
-        end
-      end
-    end)
-  end)
+    end
+  )
   return true, nil
 end
 

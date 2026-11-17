@@ -11,6 +11,7 @@
 local adapter = require("lreview.adapter")
 local storage = require("lreview.storage")
 local pull_request = require("lreview.storage.pull_request")
+local thread = require("lreview.thread")
 
 local M = {}
 
@@ -101,44 +102,49 @@ function M.search(cwd, query)
   return pull_request.search(canonical_provider(resolved), resolved.repo, query)
 end
 
---- Fetch the pull request list asynchronously in a headless nvim job
---- (non-blocking). The job prints a JSON result { n = count, e = err } to stdout.
+--- Worker thread entry point for pull_async.
+---@param db_path string
+---@param lazy_sqlite string
+---@param args table  -- { cwd }
+---@return table
+function M.fetch_pull_requests_thread(db_path, lazy_sqlite, args)
+  local resolved = adapter.resolve(args and args.cwd or nil)
+  if not resolved then
+    return { ok = false, err = "no git remote detected" }
+  end
+  local ctx = adapter.ctx(resolved)
+  local prs, err = resolved.adapter.list_pull_requests(resolved.cfg, ctx, { scope = "all" })
+  if not prs then
+    return { ok = false, err = err }
+  end
+  return { ok = true, prs = prs }
+end
+
+--- Fetch the pull request list asynchronously via a background worker thread (non-blocking).
 ---@param callback fun(success: boolean, count: integer|nil, err: string|nil)|nil
 ---@return boolean, string|nil
 function M.pull_async(callback)
   local cwd = vim.fn.getcwd()
-  local plugin_root = vim.fn.fnamemodify(debug.getinfo(1).source:match("@(.*)$"), ":h:h:h")
-  local cmd = {
-    vim.v.progpath,
-    "--headless",
-    "--cmd",
-    "set runtimepath^=" .. vim.fn.escape(plugin_root, " "),
-    "-c",
-    string.format(
-      "lua local n,e=require('lreview').api.fetch_pull_requests(%q); io.write(vim.json.encode({n=n,e=e}))",
-      cwd
-    ),
-    "-c",
-    "qa"
-  }
-  vim.system(cmd, { cwd = cwd, text = true }, function(res)
-    vim.schedule(function()
-      local data = nil
-      if res.stdout then
-        local okd, decoded = pcall(vim.json.decode, res.stdout)
-        if okd then
-          data = decoded
+  thread.run_task(
+    "pull_request.pull",
+    "lreview.pull_request",
+    "fetch_pull_requests_thread",
+    { cwd = cwd },
+    callback,
+    function(res, slot_cb)
+      if res and res.ok and res.prs then
+        local ok = storage.open()
+        if ok then
+          for _, mr in ipairs(res.prs) do
+            pull_request.upsert(mr)
+          end
         end
+        if slot_cb then slot_cb(true, #res.prs, nil) end
+      else
+        if slot_cb then slot_cb(false, nil, res and res.err or "failed to fetch pull request list") end
       end
-      if callback then
-        if data and data.n ~= nil then
-          callback(true, data.n, nil)
-        else
-          callback(false, nil, data and data.e or "failed to fetch pull request list")
-        end
-      end
-    end)
-  end)
+    end
+  )
   return true, nil
 end
 

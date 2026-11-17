@@ -19,6 +19,8 @@ local storage = require("lreview.storage")
 local pull_request = require("lreview.storage.pull_request")
 local comments = require("lreview.storage.comments")
 local outbox = require("lreview.storage.outbox")
+local submit = require("lreview.review.submit")
+local reconcile = require("lreview.review.reconcile")
 
 local M = {}
 
@@ -425,351 +427,10 @@ function M.push_edit_immediately(c_id, body)
   return true, nil
 end
 
---- Compute explicit change-set of pending local modifications for an MR.
----@param mo_id string
----@return table
-function M.compute_change_set(mo_id)
-  local pending = comments.get_pending_comments(mo_id)
-  local cs = {
-    additions = {},
-    replies = {},
-    updates = {},
-    deletions = {},
-  }
-  for _, d in ipairs(pending or {}) do
-    if d.state == comments.STATE.DELETED then
-      cs.deletions[#cs.deletions + 1] = d
-    elseif d.state == comments.STATE.MODIFIED then
-      cs.updates[#cs.updates + 1] = d
-    elseif comments.thread_is_draft(d.thread_state) then
-      cs.additions[#cs.additions + 1] = d
-    else
-      cs.replies[#cs.replies + 1] = d
-    end
-  end
-  return cs
-end
-
---- Resolve the comment a reply should be threaded under.
----
---- GitHub replies need a *comment* id; GitLab needs the discussion id. A synced
---- thread whose only remote comment is pending-delete (or whose first comment is
---- itself an unpushed draft) has no valid parent, so this returns nil and the
---- caller reports it — instead of concatenating nil into a CLI argument, which
---- is what v3 did.
----@param resolved table
----@param t_id string
----@return string|nil parent, string|nil err
-function M.reply_parent(resolved, t_id)
-  local cs = comments.comments_for_thread(t_id)
-  if resolved.provider == "gh" or resolved.provider == "github" then
-    for _, c in ipairs(cs) do
-      if c.remote_id and c.remote_id ~= "" and not comments.is_deleted(c.state) then
-        return c.remote_id, nil
-      end
-    end
-    return nil, "thread has no pushed comment to reply to"
-  end
-  if #cs == 0 then
-    return nil, "unknown thread"
-  end
-  -- GitLab threads replies by discussion id, which is our t_id.
-  return t_id, nil
-end
-
---- Translate pending comment states into push ops. Pure: reads storage only.
----
---- Ops are keyed by (c_id, op), so re-running submit never queues the same
---- mutation twice. The verdict becomes its own op whenever it cannot ride along
---- with a comment batch — exactly the case (approve/request-changes with only
---- replies or edits) where v3 dropped it silently.
----@param detail lreview.MRDetail
----@param resolved table
----@param thread_id string|nil
----@param verdict string|nil
----@return table[] ops, string[] skipped
-function M.build_ops(detail, resolved, thread_id, verdict)
-  local cs = M.compute_change_set(detail.mo_id)
-  local ops, skipped = {}, {}
-  local function keep(item)
-    return not thread_id or item.t_id == thread_id
-  end
-
-  local has_new = false
-  for _, d in ipairs(cs.additions) do
-    if keep(d) then
-      has_new = true
-      ops[#ops + 1] = {
-        mo_id = detail.mo_id, t_id = d.t_id, c_id = d.c_id,
-        op = outbox.OP.CREATE_THREAD,
-        payload = { path = d.path, line = d.start_line, end_line = d.end_line, body = d.body },
-      }
-    end
-  end
-
-  for _, d in ipairs(cs.replies) do
-    if keep(d) then
-      local parent, perr = M.reply_parent(resolved, d.t_id)
-      if parent then
-        ops[#ops + 1] = {
-          mo_id = detail.mo_id, t_id = d.t_id, c_id = d.c_id, op = outbox.OP.REPLY,
-          payload = { body = d.body, parent = parent },
-        }
-      else
-        skipped[#skipped + 1] = string.format("%s:%d (%s)",
-          d.path or "?", d.start_line or 0, perr or "unthreadable")
-      end
-    end
-  end
-
-  for _, d in ipairs(cs.updates) do
-    if keep(d) then
-      ops[#ops + 1] = {
-        mo_id = detail.mo_id, t_id = d.t_id, c_id = d.c_id, op = outbox.OP.EDIT,
-        payload = { body = d.body, remote_id = d.remote_id },
-      }
-    end
-  end
-
-  for _, d in ipairs(cs.deletions) do
-    if keep(d) then
-      ops[#ops + 1] = {
-        mo_id = detail.mo_id, t_id = d.t_id, c_id = d.c_id, op = outbox.OP.DELETE,
-        payload = { remote_id = d.remote_id, body = d.body or "" },
-      }
-    end
-  end
-
-  if not thread_id and verdict and verdict ~= "COMMENT"
-      and adapter.supports(resolved, "review_verdict") then
-    local rides_along = has_new and adapter.supports(resolved, "atomic_inline_batch")
-    if not rides_along then
-      ops[#ops + 1] = {
-        mo_id = detail.mo_id, t_id = "__mr__", c_id = "__mr__", op = outbox.OP.VERDICT,
-        payload = { verdict = verdict, body = detail.description or "" },
-      }
-    end
-  end
-
-  return ops, skipped
-end
-
---- Push the pending changes, driven by the outbox.
----
---- Replaces v3's "mark everything IN_FLIGHT, abort the batch on the first
---- error", which stranded the untouched items in a state PENDING_PUSH_MASK
---- excluded — i.e. drafts that were silently unpushable until a restart. Now:
----   * each op is committed the moment it succeeds (status DONE + the local
----     transition, in one transaction), so a later failure can never re-send a
----     note that already landed;
----   * a failure marks that op FAILED and stops its category, leaving the rest
----     QUEUED — they get retried, not resurrected from a lock;
----   * returns (pushed, err, remaining) so the caller can say "4 pushed, 2 left"
----     instead of pretending a per-note API was atomic.
----@param detail lreview.MRDetail
----@param resolved table
----@param ctx table
----@param thread_id string|nil  -- optional filter
----@param verdict string|nil
----@return integer pushed, string|nil err, integer remaining
-function M._submit_pushes(detail, resolved, ctx, thread_id, verdict)
-  -- Hubs expect an uppercase event, and callers outside the confirm UI (tests,
-  -- scripts, custom adapters) may pass "approve"/"comment". Normalize once.
-  if verdict then verdict = tostring(verdict):upper() end
-
-  local conflict_count = comments.count_conflicts(detail.mo_id)
-  if conflict_count > 0 then
-    return 0, string.format(
-      "%d conflict(s) must be resolved before pushing. Use :LocalReviewConflicts to review.",
-      conflict_count), outbox.count_pending(detail.mo_id)
-  end
-
-  local ops, skipped = M.build_ops(detail, resolved, thread_id, verdict)
-  outbox.enqueue(ops)
-
-  local function take_pending()
-    local all = outbox.pending(detail.mo_id)
-    if not thread_id then return all end
-    local out = {}
-    for _, op in ipairs(all) do
-      if op.t_id == thread_id then out[#out + 1] = op end
-    end
-    return out
-  end
-
-  if #take_pending() == 0 then
-    if #skipped > 0 then
-      return 0, "nothing pushable: " .. table.concat(skipped, "; "), 0
-    end
-    return 0, "no draft, edited, or deleted comments to submit", 0
-  end
-
-  local number = detail.number
-  local pushed = 0
-  local first_err = nil
-  local function record(err)
-    if err and not first_err then first_err = tostring(err) end
-  end
-
-  --- Commit a successful op together with its local state transition.
-  local function commit(op, remote_id, local_fn)
-    local ok_tx, tx_err = storage.with_transaction(function()
-      outbox.mark_done(op.op_id, remote_id)
-      if local_fn then local_fn(op) end
-    end)
-    if not ok_tx then
-      -- The call landed but the bookkeeping did not. Keep the op non-terminal
-      -- and flag it uncertain: reconcile adopts it by body match instead of the
-      -- next submit posting a second copy.
-      outbox.mark_uncertain(op.op_id, "pushed but not recorded locally: " .. tostring(tx_err))
-      record("pushed a change that could not be recorded locally: " .. tostring(tx_err))
-      return false
-    end
-    pushed = pushed + 1
-    return true
-  end
-
-  local function group(kind)
-    local out = {}
-    for _, op in ipairs(take_pending()) do
-      if op.op == kind then out[#out + 1] = op end
-    end
-    return out
-  end
-
-  local function consume_draft(op)
-    comments.delete_comment(op.c_id)
-    comments.delete_thread(op.t_id)
-  end
-
-  -- 1. New threads -----------------------------------------------------------
-  local creates = group(outbox.OP.CREATE_THREAD)
-  if #creates > 0 then
-    local function to_batch(list)
-      local batch = {}
-      for _, op in ipairs(list) do
-        batch[#batch + 1] = {
-          path = op.path, line = op.line, start_line = op.line, end_line = op.end_line,
-          body = op.body, t_id = op.t_id, c_id = op.c_id,
-        }
-      end
-      return batch
-    end
-
-    if adapter.supports(resolved, "atomic_inline_batch") then
-      -- One review POST: GitHub creates all comments or none. Lock the group
-      -- first: if the process dies mid-call, recovery flags these ops
-      -- uncertain and reconcile adopts whatever actually landed.
-      for _, op in ipairs(creates) do outbox.mark_running(op.op_id) end
-      local ok, err = resolved.adapter.submit_inline_review(
-        resolved.cfg, ctx, number, to_batch(creates), nil, { verdict = verdict })
-      if ok then
-        for _, op in ipairs(creates) do
-          -- The synced copy arrives via the reconcile that follows: a batch
-          -- review POST does not hand back per-comment ids.
-          commit(op, nil, consume_draft)
-        end
-      else
-        -- Nothing landed (all-or-nothing), so the group goes back to QUEUED.
-        for _, op in ipairs(creates) do outbox.mark_queued(op.op_id) end
-        record(err)
-      end
-    else
-      -- Per-note platforms: drive the loop here so every success is committed
-      -- immediately. This is what stops a mid-loop failure from re-posting the
-      -- notes that already landed.
-      for _, op in ipairs(creates) do
-        outbox.mark_running(op.op_id)
-        local ok, err = resolved.adapter.submit_inline_review(
-          resolved.cfg, ctx, number, to_batch({ op }))
-        if not ok then
-          outbox.mark_failed(op.op_id, err)
-          record(err)
-          break
-        end
-        commit(op, nil, consume_draft)
-      end
-    end
-  end
-
-  -- 2. Replies --------------------------------------------------------------
-  for _, op in ipairs(group(outbox.OP.REPLY)) do
-    outbox.mark_running(op.op_id)
-    local remote_id, err = resolved.adapter.submit_reply(
-      resolved.cfg, ctx, number, op.parent, op.body)
-    if not remote_id then
-      outbox.mark_failed(op.op_id, err)
-      record(err)
-      break
-    end
-    local rid = remote_id
-    commit(op, rid, function(o) comments.mark_comment_synced(o.c_id, rid) end)
-  end
-
-  -- 3. Edits ----------------------------------------------------------------
-  for _, op in ipairs(group(outbox.OP.EDIT)) do
-    if not op.remote_id or op.remote_id == "" then
-      outbox.mark_failed(op.op_id, "comment was never pushed")
-      record("an edited comment has no remote id; pull to reconcile before editing it")
-      break
-    end
-    outbox.mark_running(op.op_id)
-    local ok, err = resolved.adapter.update_comment(
-      resolved.cfg, ctx, number, op.t_id, op.remote_id, op.body)
-    if not ok then
-      outbox.mark_failed(op.op_id, err)
-      record(err)
-      break
-    end
-    commit(op, op.remote_id, function(o) comments.mark_clean(o.c_id) end)
-  end
-
-  -- 4. Deletions ------------------------------------------------------------
-  for _, op in ipairs(group(outbox.OP.DELETE)) do
-    if not op.remote_id or op.remote_id == "" then
-      -- Local-only draft: there is no remote object to delete, so consuming it
-      -- locally IS the whole job (v3 sent a real API call and 404'd).
-      commit(op, nil, function(o) comments.delete_comment(o.c_id) end)
-    else
-      outbox.mark_running(op.op_id)
-      local ok, err = resolved.adapter.delete_comment(
-        resolved.cfg, ctx, number, op.t_id, op.remote_id)
-      if not ok then
-        outbox.mark_failed(op.op_id, err)
-        record(err)
-        break
-      end
-      commit(op, op.remote_id, function(o) comments.delete_comment(o.c_id) end)
-    end
-  end
-
-  -- 5. Verdict --------------------------------------------------------------
-  -- Only reached when build_ops decided the verdict could not ride along with a
-  -- comment batch. An adapter that claims review_verdict but ships no
-  -- submit_verdict is reported as a failure rather than a silent no-op.
-  for _, op in ipairs(group(outbox.OP.VERDICT)) do
-    local ok, err
-    outbox.mark_running(op.op_id)
-    if resolved.adapter.submit_verdict then
-      ok, err = resolved.adapter.submit_verdict(
-        resolved.cfg, ctx, number, op.verdict, op.body)
-    else
-      ok, err = false, "active adapter declares review_verdict but has no submit_verdict"
-    end
-    if not ok then
-      outbox.mark_failed(op.op_id, err)
-      record(err)
-      break
-    end
-    commit(op, nil)
-  end
-
-  local remaining = #take_pending()
-  if #skipped > 0 then
-    record("skipped: " .. table.concat(skipped, "; "))
-  end
-  return pushed, first_err, remaining
-end
+M.compute_change_set = submit.compute_change_set
+M.reply_parent = submit.reply_parent
+M.build_ops = submit.build_ops
+M._submit_pushes = submit.submit_pushes
 
 --- Build the confirmation summary and verdict choice for submit_review.
 --- Runs on the main thread (UI required).
@@ -843,60 +504,49 @@ end
 ---@param args table  -- { cwd, detail, thread_id, verdict }
 ---@return table
 function M.submit_review_thread(db_path, lazy_sqlite, args)
-  local sqlite = require("sqlite")
-  local db = sqlite.new(db_path, { keep_open = true })
-  db:eval("PRAGMA journal_mode=WAL;")
-  db:eval("PRAGMA busy_timeout=5000;")
-  -- Worker threads must skip `ensure_db()` → `open_raw()` → `vim.fn` (nil on
-  -- `uv.new_work` per doc 09 §2.5). Attaching this connection lets
-  -- `storage.query`/`execute` and the outbox/comments CRUD modules use it
-  -- directly. This is doc 09 §7.5's "target a specific connection" fix,
-  -- landed on the module-local side so callers stay unchanged.
-  storage.attach_db(db)
+  return thread.with_worker_db(db_path, lazy_sqlite, function()
+    local old_current = M.current
+    if args and args.cwd and args.detail then
+      M.current = { cwd = args.cwd, detail = args.detail }
+    end
 
-  local old_current = M.current
-  if args and args.cwd and args.detail then
-    M.current = { cwd = args.cwd, detail = args.detail }
-  end
+    -- Resolve adapter on thread (uses io.popen fallback for git commands).
+    local resolved = adapter.resolve(M.current.cwd)
+    if not resolved then
+      M.current = old_current
+      return { ok = false, err = "no git remote detected", notifications = {} }
+    end
+    local ctx = adapter.ctx(resolved, args.detail.number)
 
-  -- Resolve adapter on thread (uses io.popen fallback for git commands).
-  local resolved = adapter.resolve(M.current.cwd)
-  if not resolved then
+    thread_mode = true
+    M._notifications = {}
+
+    local count, err, remaining = M._submit_pushes(
+      args.detail, resolved, ctx, args.thread_id, args.verdict)
+
+    -- Reconcile on success AND on partial failure: a half-pushed batch needs the
+    -- remote's truth to adopt what landed (and to surface conflicts) before the
+    -- next submit retries the rest.
+    local remote_threads = M._fetch_remote_threads(args.detail, resolved, ctx)
+    if remote_threads then
+      M._reconcile_threads(args.detail, remote_threads)
+      outbox.prune_done(args.detail.mo_id)
+    end
+
+    local notifications = M._notifications
+    M._notifications = {}
+    thread_mode = false
+
     M.current = old_current
-    db:close()
-    return { ok = false, err = "no git remote detected", notifications = {} }
-  end
-  local ctx = adapter.ctx(resolved, args.detail.number)
 
-  thread_mode = true
-  M._notifications = {}
-
-  local count, err, remaining = M._submit_pushes(
-    args.detail, resolved, ctx, args.thread_id, args.verdict)
-
-  -- Reconcile on success AND on partial failure: a half-pushed batch needs the
-  -- remote's truth to adopt what landed (and to surface conflicts) before the
-  -- next submit retries the rest.
-  local remote_threads = M._fetch_remote_threads(args.detail, resolved, ctx)
-  if remote_threads then
-    M._reconcile_threads(args.detail, remote_threads)
-    outbox.prune_done(args.detail.mo_id)
-  end
-
-  local notifications = M._notifications
-  M._notifications = {}
-  thread_mode = false
-
-  M.current = old_current
-  db:close()
-
-  return {
-    ok = (err == nil),
-    count = count or 0,
-    err = err,
-    remaining = remaining or 0,
-    notifications = notifications,
-  }
+    return {
+      ok = (err == nil),
+      count = count or 0,
+      err = err,
+      remaining = remaining or 0,
+      notifications = notifications,
+    }
+  end)
 end
 
 local submit_worker = nil
@@ -1036,226 +686,16 @@ function M.list_drafts()
   return comments.draft_threads(M.current.detail.mo_id)
 end
 
---- Fetch remote threads/comments for an MR (network call).
---- Separated so submit-on-thread can reuse it without duplicating the
---- adapter interaction. (Plan 07 §2.8 — item 2 decomposition.)
----@param detail lreview.MRDetail
----@param resolved table
----@param ctx table
----@return table[]|nil remote_threads, string|nil err
-function M._fetch_remote_threads(detail, resolved, ctx)
-  return resolved.adapter.fetch_threads(resolved.cfg, ctx, detail.number, detail.mo_id)
-end
+M._fetch_remote_threads = reconcile.fetch_remote_threads
 
 --- Reconcile remote threads into local storage (batched, O(n)).
 --- Pure DB work — no network calls. Separated from fetch so both
 --- sync_review and submit_review_thread can share it.
---- (Plan 07 §2.8.1 — ~11x faster on large MRs.)
 ---@param detail lreview.MRDetail
 ---@param remote_threads table[]
 ---@return integer synced  -- number of remote threads processed
 function M._reconcile_threads(detail, remote_threads)
-  local remote_t_ids = {}
-  local remote_c_ids = {}
-  local now = os.date("!%Y-%m-%dT%H:%M:%SZ")
-  local n = 0
-
-  -- Batched reconcile: load all local comments for this MR once, index them in
-  -- memory by t_id -> c_id. Turns the N+1 inner-loop lookup into O(1) lookups.
-  local local_by_thread = {}
-  local local_comments = storage.query([[
-    SELECT c.*, t.path, t.line_start, t.line_end, t.state as thread_state
-    FROM comments c JOIN threads t ON c.t_id = t.t_id
-    WHERE t.mo_id = ?
-  ]], detail.mo_id)
-  for _, lc in ipairs(local_comments) do
-    local_by_thread[lc.t_id] = local_by_thread[lc.t_id] or {}
-    local_by_thread[lc.t_id][lc.c_id] = lc
-  end
-
-  -- Crash-recovery index: ops that were RUNNING when the process died have an
-  -- unknown outcome. If the remote turns out to already contain that body, we
-  -- adopt it (mark the op DONE, consume the local draft) instead of leaving the
-  -- draft queued to be posted a second time on the next submit.
-  local uncertain = outbox.uncertain_by_body(detail.mo_id)
-
-  for _, t in ipairs(remote_threads) do
-    remote_t_ids[t.t_id] = true
-    local local_t = comments.get_thread(t.t_id)
-
-    if local_t == nil then
-      -- Brand new remote thread — insert as SYNCED.
-      comments.create_thread({
-        t_id = t.t_id,
-        mo_id = detail.mo_id,
-        path = t.path,
-        commit_sha = t.commit_sha,
-        start_line = t.start_line,
-        end_line = t.end_line,
-        is_draft = false,
-        resolved = t.resolved == 1,
-        last_synced_at = now,
-      })
-    elseif comments.thread_is_draft(local_t.state) then
-      -- Local DRAFT thread: never overwrite it with remote data.
-    else
-      -- Existing synced thread: update resolved bit and payload.
-      comments.create_thread({
-        t_id = t.t_id,
-        mo_id = detail.mo_id,
-        path = t.path,
-        commit_sha = t.commit_sha,
-        start_line = t.start_line,
-        end_line = t.end_line,
-        is_draft = false,
-        resolved = t.resolved == 1,
-        last_synced_at = now,
-      })
-    end
-
-    -- Process comments inside this thread.
-    for _, c in ipairs(t.comments or {}) do
-      remote_c_ids[c.c_id] = true
-
-      -- Find our local copy by remote_id (c_id on remote == c_id in our DB
-      -- once synced; for first-time arrivals, look by remote_id field).
-      local local_c
-      local t_idx = local_by_thread[t.t_id]
-      if t_idx then
-        local_c = t_idx[c.c_id]
-        if not local_c then
-          for _, lc in pairs(t_idx) do
-            if lc.remote_id == c.remote_id then
-              local_c = lc
-              break
-            end
-          end
-        end
-      end
-
-      if local_c then
-        local decoded_lc = local_c
-        if decoded_lc.payload then
-          local mpack_payload = vim.mpack.decode(decoded_lc.payload) or {}
-          decoded_lc = vim.tbl_extend("force", decoded_lc, mpack_payload)
-          decoded_lc.payload = nil
-        end
-
-        if decoded_lc then
-          local lstate = decoded_lc.state
-
-          if lstate == comments.STATE.DRAFT then
-            -- DRAFT: never overwrite.
-          elseif lstate == comments.STATE.SYNCED then
-            comments.add_comment({
-              c_id = c.c_id,
-              t_id = t.t_id,
-              remote_id = c.remote_id,
-              author = c.author,
-              body = c.body,
-              created_at = c.created_at,
-              in_reply_to = c.in_reply_to,
-              state = comments.STATE.SYNCED,
-            })
-          elseif lstate == comments.STATE.MODIFIED then
-            local synced_body = decoded_lc.synced_body
-            if c.body ~= synced_body then
-              comments.mark_comment_conflict(decoded_lc.c_id, c.body, "remote_edited")
-              notify(
-                string.format("lreview: conflict on %s:%d — remote edited a comment you are editing",
-                  t.path, t.start_line or 0),
-                vim.log.levels.WARN)
-            end
-          elseif lstate == comments.STATE.DELETED then
-            local synced_body = decoded_lc.synced_body
-            if c.body ~= synced_body then
-              comments.mark_comment_conflict(decoded_lc.c_id, c.body, "remote_edited")
-              notify(
-                string.format("lreview: conflict on %s:%d — remote edited a comment you deleted",
-                  t.path, t.start_line or 0),
-                vim.log.levels.WARN)
-            end
-          elseif lstate == comments.STATE.CONFLICT then
-            comments.mark_comment_conflict(decoded_lc.c_id, c.body, decoded_lc.conflict_reason or "remote_edited")
-          end
-        end
-      else
-        -- No local copy. Before inserting a fresh SYNCED row, check whether
-        -- this is a comment WE pushed whose result was never recorded locally
-        -- (crash between the network call and the outbox write). Adopting it
-        -- consumes the local draft so it cannot be posted twice.
-        local adopt = uncertain[c.body or ""]
-        if adopt then
-          outbox.mark_done(adopt.op_id, c.remote_id)
-          comments.delete_comment(adopt.c_id)
-          if adopt.op == outbox.OP.CREATE_THREAD then
-            comments.delete_thread(adopt.t_id)
-          end
-          uncertain[c.body or ""] = nil
-        end
-        comments.add_comment({
-          c_id = c.c_id,
-          t_id = t.t_id,
-          remote_id = c.remote_id,
-          author = c.author,
-          body = c.body,
-          created_at = c.created_at,
-          in_reply_to = c.in_reply_to,
-          state = comments.STATE.SYNCED,
-        })
-      end
-    end
-    n = n + 1
-  end
-
-  -- Handle remote-side deletions
-  local all_synced = storage.query([[
-    SELECT c.c_id, c.remote_id, c.state, c.payload, t.path, t.line_start
-    FROM comments c
-    JOIN threads t ON c.t_id = t.t_id
-    WHERE t.mo_id = ? AND c.remote_id IS NOT NULL
-  ]], detail.mo_id)
-
-  for _, ec in ipairs(all_synced or {}) do
-    if not remote_c_ids[ec.remote_id] then
-      local lstate = ec.state
-
-      if lstate == comments.STATE.SYNCED then
-        comments.delete_comment(ec.c_id)
-      elseif lstate == comments.STATE.MODIFIED then
-        comments.mark_comment_conflict(ec.c_id, "", "remote_deleted")
-        notify(
-          string.format("lreview: conflict on %s:%d — remote deleted a comment you are editing",
-            ec.path or "?", ec.line_start or 0),
-          vim.log.levels.WARN)
-      elseif lstate == comments.STATE.DELETED then
-        comments.delete_comment(ec.c_id)
-      end
-    end
-  end
-
-  -- Handle threads deleted on the remote
-  local all_local_threads = comments.threads_for_mr(detail.mo_id)
-  for _, lt in ipairs(all_local_threads) do
-    if not comments.thread_is_draft(lt.state) and not remote_t_ids[lt.t_id] then
-      local draft_children = storage.query([[
-        SELECT COUNT(*) as n FROM comments WHERE t_id = ? AND state = ?
-      ]], lt.t_id, comments.STATE.DRAFT)
-      local has_orphaned_drafts = (draft_children[1] and draft_children[1].n or 0) > 0
-
-      if has_orphaned_drafts then
-        comments.mark_thread_conflict(lt.t_id, "remote_deleted_has_drafts")
-        notify(
-          string.format("lreview: conflict — thread on %s deleted remotely but you have unsent replies",
-            lt.path or "?"),
-          vim.log.levels.WARN)
-      else
-        comments.delete_thread(lt.t_id)
-      end
-    end
-  end
-
-  return n
+  return reconcile.reconcile_threads(detail, remote_threads, notify)
 end
 
 --- Sync remote MR threads/comments into local storage.
@@ -1301,39 +741,29 @@ end
 ---@param args table  -- { cwd, detail }
 ---@return table
 function M.sync_review_thread(db_path, lazy_sqlite, args)
-  local sqlite = require("sqlite")
-  local db = sqlite.new(db_path, { keep_open = true })
-  db:eval("PRAGMA journal_mode=WAL;")
-  db:eval("PRAGMA busy_timeout=5000;")
-  -- Worker threads must skip `ensure_db()` → `open_raw()` → `vim.fn` (nil on
-  -- `uv.new_work` per doc 09 §2.5). Attaching this connection lets
-  -- `storage.query`/`execute` and the outbox/comments CRUD modules use it
-  -- directly. This is doc 09 §7.5's "target a specific connection" fix,
-  -- landed on the module-local side so callers stay unchanged.
-  storage.attach_db(db)
+  return thread.with_worker_db(db_path, lazy_sqlite, function()
+    local old_current = M.current
+    if args and args.cwd and args.detail then
+      M.current = {
+        cwd = args.cwd,
+        detail = args.detail,
+      }
+    end
 
-  local old_current = M.current
-  if args and args.cwd and args.detail then
-    M.current = {
-      cwd = args.cwd,
-      detail = args.detail,
-    }
-  end
+    thread_mode = true
+    M._notifications = {}
+    local count, err = M.sync_review()
+    local notifications = M._notifications
+    M._notifications = {}
+    thread_mode = false
 
-  thread_mode = true
-  M._notifications = {}
-  local count, err = M.sync_review()
-  local notifications = M._notifications
-  M._notifications = {}
-  thread_mode = false
+    M.current = old_current
 
-  M.current = old_current
-  db:close()
-
-  if err then
-    return { ok = false, err = err, notifications = notifications }
-  end
-  return { ok = true, count = count, notifications = notifications }
+    if err then
+      return { ok = false, err = err, notifications = notifications }
+    end
+    return { ok = true, count = count, notifications = notifications }
+  end)
 end
 
 local thread_worker = nil
@@ -1398,38 +828,25 @@ end
 ---@param args table  -- { cwd, detail, number }
 ---@return table
 function M.close_review_thread(db_path, lazy_sqlite, args)
-  local sqlite = require("sqlite")
-  local db = sqlite.new(db_path, { keep_open = true })
-  db:eval("PRAGMA journal_mode=WAL;")
-  db:eval("PRAGMA busy_timeout=5000;")
-  -- Worker threads must skip `ensure_db()` → `open_raw()` → `vim.fn` (nil on
-  -- `uv.new_work` per doc 09 §2.5). Attaching this connection lets
-  -- `storage.query`/`execute` and the outbox/comments CRUD modules use it
-  -- directly. This is doc 09 §7.5's "target a specific connection" fix,
-  -- landed on the module-local side so callers stay unchanged.
-  storage.attach_db(db)
+  return thread.with_worker_db(db_path, lazy_sqlite, function(db)
+    local old_current = M.current
+    if args and args.cwd and args.detail then
+      M.current = { cwd = args.cwd, detail = args.detail }
+    end
 
-  local old_current = M.current
-  if args and args.cwd and args.detail then
-    M.current = { cwd = args.cwd, detail = args.detail }
-  end
+    local num = args and args.number or (M.current and M.current.detail and M.current.detail.number)
+    local resolved = adapter.resolve(M.current.cwd)
+    if not resolved then
+      M.current = old_current
+      return { ok = false, err = "no git remote detected" }
+    end
+    local ctx = adapter.ctx(resolved, num)
+    local ok, err = resolved.adapter.close_mr(resolved.cfg, ctx, num)
 
-  local num = args and args.number or (M.current and M.current.detail and M.current.detail.number)
-  local resolved = adapter.resolve(M.current.cwd)
-  if not resolved then
     M.current = old_current
-    db:close()
-    return { ok = false, err = "no git remote detected" }
-  end
-  local ctx = adapter.ctx(resolved, num)
-  local ok, err = resolved.adapter.close_mr(resolved.cfg, ctx, num)
-
-  M.current = old_current
-  db:close()
-  return { ok = ok, err = err, number = num }
+    return { ok = ok, err = err, number = num }
+  end)
 end
-
-local close_worker = nil
 
 --- Close an MR on the platform without blocking the UI.
 --- Resolves the remote close call on a uv.new_work worker and updates local
@@ -1450,8 +867,10 @@ function M.close_review_async(number, callback)
   end
   local cwd = M.current.cwd or vim.fn.getcwd()
 
-  if not close_worker then
-    close_worker = thread.create_worker("lreview.review", "close_review_thread", function(res)
+  thread.run_task("review.close", "lreview.review", "close_review_thread",
+    { cwd = cwd, detail = detail, number = num },
+    callback,
+    function(res)
       if res and res.ok then
         local pull_request_storage = require("lreview.storage.pull_request")
         local pr_detail = M.current and M.current.detail
@@ -1459,12 +878,7 @@ function M.close_review_async(number, callback)
           pull_request_storage.update_state(pr_detail.mo_id, "closed")
         end
       end
-      thread.dispatch_cb("review.close", res and res.ok, res and res.err or nil)
     end)
-  end
-
-  thread.arm("review.close", callback)
-  close_worker:queue({ cwd = cwd, detail = detail, number = num })
   return false, nil
 end
 
@@ -1476,38 +890,25 @@ end
 ---@param args table  -- { cwd, detail, number }
 ---@return table
 function M.approve_review_thread(db_path, lazy_sqlite, args)
-  local sqlite = require("sqlite")
-  local db = sqlite.new(db_path, { keep_open = true })
-  db:eval("PRAGMA journal_mode=WAL;")
-  db:eval("PRAGMA busy_timeout=5000;")
-  -- Worker threads must skip `ensure_db()` → `open_raw()` → `vim.fn` (nil on
-  -- `uv.new_work` per doc 09 §2.5). Attaching this connection lets
-  -- `storage.query`/`execute` and the outbox/comments CRUD modules use it
-  -- directly. This is doc 09 §7.5's "target a specific connection" fix,
-  -- landed on the module-local side so callers stay unchanged.
-  storage.attach_db(db)
+  return thread.with_worker_db(db_path, lazy_sqlite, function(db)
+    local old_current = M.current
+    if args and args.cwd and args.detail then
+      M.current = { cwd = args.cwd, detail = args.detail }
+    end
 
-  local old_current = M.current
-  if args and args.cwd and args.detail then
-    M.current = { cwd = args.cwd, detail = args.detail }
-  end
+    local num = args and args.number or (M.current and M.current.detail and M.current.detail.number)
+    local resolved = adapter.resolve(M.current.cwd)
+    if not resolved then
+      M.current = old_current
+      return { ok = false, err = "no git remote detected" }
+    end
+    local ctx = adapter.ctx(resolved, num)
+    local ok, err = resolved.adapter.approve_mr(resolved.cfg, ctx, num)
 
-  local num = args and args.number or (M.current and M.current.detail and M.current.detail.number)
-  local resolved = adapter.resolve(M.current.cwd)
-  if not resolved then
     M.current = old_current
-    db:close()
-    return { ok = false, err = "no git remote detected" }
-  end
-  local ctx = adapter.ctx(resolved, num)
-  local ok, err = resolved.adapter.approve_mr(resolved.cfg, ctx, num)
-
-  M.current = old_current
-  db:close()
-  return { ok = ok, err = err, number = num }
+    return { ok = ok, err = err, number = num }
+  end)
 end
-
-local approve_worker = nil
 
 --- Approve an MR on the platform without blocking the UI.
 --- Runs the remote approve call on a uv.new_work worker.
@@ -1527,8 +928,10 @@ function M.approve_review_async(number, callback)
   end
   local cwd = M.current.cwd or vim.fn.getcwd()
 
-  if not approve_worker then
-    approve_worker = thread.create_worker("lreview.review", "approve_review_thread", function(res)
+  thread.run_task("review.approve", "lreview.review", "approve_review_thread",
+    { cwd = cwd, detail = detail, number = num },
+    callback,
+    function(res)
       if res and res.ok then
         local pull_request_storage = require("lreview.storage.pull_request")
         local pr_detail = M.current and M.current.detail
@@ -1536,12 +939,7 @@ function M.approve_review_async(number, callback)
           pull_request_storage.update_state(pr_detail.mo_id, "approved")
         end
       end
-      thread.dispatch_cb("review.approve", res and res.ok, res and res.err or nil)
     end)
-  end
-
-  thread.arm("review.approve", callback)
-  approve_worker:queue({ cwd = cwd, detail = detail, number = num })
   return false, nil
 end
 
@@ -1554,40 +952,27 @@ end
 ---@param args table  -- { cwd, detail, thread_id, resolved_val }
 ---@return table
 function M.resolve_thread_thread(db_path, lazy_sqlite, args)
-  local sqlite = require("sqlite")
-  local db = sqlite.new(db_path, { keep_open = true })
-  db:eval("PRAGMA journal_mode=WAL;")
-  db:eval("PRAGMA busy_timeout=5000;")
-  -- Worker threads must skip `ensure_db()` → `open_raw()` → `vim.fn` (nil on
-  -- `uv.new_work` per doc 09 §2.5). Attaching this connection lets
-  -- `storage.query`/`execute` and the outbox/comments CRUD modules use it
-  -- directly. This is doc 09 §7.5's "target a specific connection" fix,
-  -- landed on the module-local side so callers stay unchanged.
-  storage.attach_db(db)
+  return thread.with_worker_db(db_path, lazy_sqlite, function()
+    local old_current = M.current
+    if args and args.cwd and args.detail then
+      M.current = { cwd = args.cwd, detail = args.detail }
+    end
 
-  local old_current = M.current
-  if args and args.cwd and args.detail then
-    M.current = { cwd = args.cwd, detail = args.detail }
-  end
+    local resolved = adapter.resolve(M.current.cwd)
+    if not resolved then
+      M.current = old_current
+      return { ok = false, err = "no git remote detected" }
+    end
+    local ctx = adapter.ctx(resolved, M.current.detail.number)
+    local ok, err = resolved.adapter.resolve_thread(
+      resolved.cfg, ctx, M.current.detail.number, args.thread_id, args.resolved_val)
 
-  local resolved = adapter.resolve(M.current.cwd)
-  if not resolved then
     M.current = old_current
-    db:close()
-    return { ok = false, err = "no git remote detected" }
-  end
-  local ctx = adapter.ctx(resolved, M.current.detail.number)
-  local ok, err = resolved.adapter.resolve_thread(
-    resolved.cfg, ctx, M.current.detail.number, args.thread_id, args.resolved_val)
-
-  M.current = old_current
-  db:close()
-  -- Echo which thread this result belongs to: the completion closure is shared
-  -- across all calls, so it must not use a captured `thread_id`.
-  return { ok = ok, err = err, thread_id = args.thread_id, resolved_val = args.resolved_val }
+    -- Echo which thread this result belongs to: the completion closure is shared
+    -- across all calls, so it must not use a captured `thread_id`.
+    return { ok = ok, err = err, thread_id = args.thread_id, resolved_val = args.resolved_val }
+  end)
 end
-
-local resolve_worker = nil
 
 --- Resolve a synced thread on the platform without blocking the UI.
 --- Draft threads are resolved locally/synchronously; synced threads hit the
@@ -1617,18 +1002,19 @@ function M.resolve_thread_async(thread_id, resolved_val, callback)
   local detail = M.current.detail
   local cwd = M.current.cwd or vim.fn.getcwd()
 
-  if not resolve_worker then
-    resolve_worker = thread.create_worker("lreview.review", "resolve_thread_thread", function(res)
+  return thread.run_task(
+    "review.resolve_thread",
+    "lreview.review",
+    "resolve_thread_thread",
+    { cwd = cwd, detail = detail, thread_id = thread_id, resolved_val = resolved_val },
+    callback,
+    function(res, slot_cb)
       if res and res.ok and res.thread_id then
         comments.resolve_thread(res.thread_id, res.resolved_val == true)
       end
-      thread.dispatch_cb("review.resolve_thread", res and res.ok, res and res.err or nil)
-    end)
-  end
-
-  thread.arm("review.resolve_thread", callback)
-  resolve_worker:queue({ cwd = cwd, detail = detail, thread_id = thread_id, resolved_val = resolved_val })
-  return false, nil
+      if slot_cb then slot_cb(res and res.ok, res and res.err or nil) end
+    end
+  )
 end
 
 --- Thread-entry point for create_review_async.
@@ -1638,33 +1024,19 @@ end
 ---@param args table  -- { cwd, opts }
 ---@return table
 function M.create_review_thread(db_path, lazy_sqlite, args)
-  local sqlite = require("sqlite")
-  local db = sqlite.new(db_path, { keep_open = true })
-  db:eval("PRAGMA journal_mode=WAL;")
-  db:eval("PRAGMA busy_timeout=5000;")
-  -- Worker threads must skip `ensure_db()` → `open_raw()` → `vim.fn` (nil on
-  -- `uv.new_work` per doc 09 §2.5). Attaching this connection lets
-  -- `storage.query`/`execute` and the outbox/comments CRUD modules use it
-  -- directly. This is doc 09 §7.5's "target a specific connection" fix,
-  -- landed on the module-local side so callers stay unchanged.
-  storage.attach_db(db)
-
-  if args and args.cwd then
-    M.current = { cwd = args.cwd, detail = M.current and M.current.detail }
-  end
-  local resolved = adapter.resolve(args.cwd)
-  if not resolved then
-    db:close()
-    return { ok = false, err = "no git remote detected" }
-  end
-  local ctx = adapter.ctx(resolved)
-  local url, err = resolved.adapter.create_mr(resolved.cfg, ctx, args.opts)
-
-  db:close()
-  return { ok = (url ~= nil), url = url, err = err }
+  return thread.with_worker_db(db_path, lazy_sqlite, function()
+    if args and args.cwd then
+      M.current = { cwd = args.cwd, detail = M.current and M.current.detail }
+    end
+    local resolved = adapter.resolve(args.cwd)
+    if not resolved then
+      return { ok = false, err = "no git remote detected" }
+    end
+    local ctx = adapter.ctx(resolved)
+    local url, err = resolved.adapter.create_mr(resolved.cfg, ctx, args.opts)
+    return { ok = (url ~= nil), url = url, err = err }
+  end)
 end
-
-local create_worker = nil
 
 --- Create a new MR/PR on the platform without blocking the UI.
 ---@param opts table  -- { title, body, source_branch, target_branch, template }
@@ -1673,14 +1045,16 @@ local create_worker = nil
 ---@return boolean, string|nil  -- false, nil when queued (async)
 function M.create_review_async(opts, cwd, callback)
   cwd = cwd or (M.current and M.current.cwd) or vim.fn.getcwd()
-  if not create_worker then
-    create_worker = thread.create_worker("lreview.review", "create_review_thread", function(res)
-      thread.dispatch_cb("review.create", res and res.url, res and res.err or nil)
-    end)
-  end
-  thread.arm("review.create", callback)
-  create_worker:queue({ cwd = cwd, opts = opts })
-  return false, nil
+  return thread.run_task(
+    "review.create",
+    "lreview.review",
+    "create_review_thread",
+    { cwd = cwd, opts = opts },
+    callback,
+    function(res, slot_cb)
+      if slot_cb then slot_cb(res and res.url, res and res.err or nil) end
+    end
+  )
 end
 
 --- Thread-entry point for request_reviewers_async.
@@ -1690,42 +1064,28 @@ end
 ---@param args table  -- { cwd, number, reviewers }
 ---@return table
 function M.request_reviewers_thread(db_path, lazy_sqlite, args)
-  local sqlite = require("sqlite")
-  local db = sqlite.new(db_path, { keep_open = true })
-  db:eval("PRAGMA journal_mode=WAL;")
-  db:eval("PRAGMA busy_timeout=5000;")
-  -- Worker threads must skip `ensure_db()` → `open_raw()` → `vim.fn` (nil on
-  -- `uv.new_work` per doc 09 §2.5). Attaching this connection lets
-  -- `storage.query`/`execute` and the outbox/comments CRUD modules use it
-  -- directly. This is doc 09 §7.5's "target a specific connection" fix,
-  -- landed on the module-local side so callers stay unchanged.
-  storage.attach_db(db)
+  return thread.with_worker_db(db_path, lazy_sqlite, function()
+    local old_current = M.current
+    if args and args.cwd and args.detail then
+      M.current = { cwd = args.cwd, detail = args.detail }
+    end
+    local num = args and args.number or (M.current and M.current.detail and M.current.detail.number)
+    local resolved = adapter.resolve(args.cwd)
+    if not resolved then
+      M.current = old_current
+      return { ok = false, err = "no git remote detected" }
+    end
+    if not adapter.supports(resolved, "assign_reviewers") then
+      M.current = old_current
+      return { ok = false, err = "reviewer assignment capability is not supported by active adapter" }
+    end
+    local ctx = adapter.ctx(resolved, num)
+    local ok, err = resolved.adapter.assign_reviewers(resolved.cfg, ctx, num, args.reviewers)
 
-  local old_current = M.current
-  if args and args.cwd and args.detail then
-    M.current = { cwd = args.cwd, detail = args.detail }
-  end
-  local num = args and args.number or (M.current and M.current.detail and M.current.detail.number)
-  local resolved = adapter.resolve(args.cwd)
-  if not resolved then
     M.current = old_current
-    db:close()
-    return { ok = false, err = "no git remote detected" }
-  end
-  if not adapter.supports(resolved, "assign_reviewers") then
-    M.current = old_current
-    db:close()
-    return { ok = false, err = "reviewer assignment capability is not supported by active adapter" }
-  end
-  local ctx = adapter.ctx(resolved, num)
-  local ok, err = resolved.adapter.assign_reviewers(resolved.cfg, ctx, num, args.reviewers)
-
-  M.current = old_current
-  db:close()
-  return { ok = ok, err = err }
+    return { ok = ok, err = err }
+  end)
 end
-
-local request_reviewers_worker = nil
 
 --- Request reviewers for an MR/PR without blocking the UI.
 ---@param reviewers string[]
@@ -1741,19 +1101,21 @@ function M.request_reviewers_async(reviewers, number, cwd, callback)
   end
   cwd = cwd or (M.current and M.current.cwd) or vim.fn.getcwd()
 
-  if not request_reviewers_worker then
-    request_reviewers_worker = thread.create_worker("lreview.review", "request_reviewers_thread", function(res)
-      thread.dispatch_cb("review.request_reviewers", res and res.ok, res and res.err or nil)
-    end)
-  end
-  thread.arm("review.request_reviewers", callback)
-  request_reviewers_worker:queue({
-    cwd = cwd,
-    detail = M.current and M.current.detail,
-    number = num,
-    reviewers = reviewers,
-  })
-  return false, nil
+  return thread.run_task(
+    "review.request_reviewers",
+    "lreview.review",
+    "request_reviewers_thread",
+    {
+      cwd = cwd,
+      detail = M.current and M.current.detail,
+      number = num,
+      reviewers = reviewers,
+    },
+    callback,
+    function(res, slot_cb)
+      if slot_cb then slot_cb(res and res.ok, res and res.err or nil) end
+    end
+  )
 end
 
 --- Thread-entry point for update_review_async.
@@ -1763,39 +1125,26 @@ end
 ---@param args table  -- { cwd, number, title, body }
 ---@return table
 function M.update_review_thread(db_path, lazy_sqlite, args)
-  local sqlite = require("sqlite")
-  local db = sqlite.new(db_path, { keep_open = true })
-  db:eval("PRAGMA journal_mode=WAL;")
-  db:eval("PRAGMA busy_timeout=5000;")
-  -- Worker threads must skip `ensure_db()` → `open_raw()` → `vim.fn` (nil on
-  -- `uv.new_work` per doc 09 §2.5). Attaching this connection lets
-  -- `storage.query`/`execute` and the outbox/comments CRUD modules use it
-  -- directly. This is doc 09 §7.5's "target a specific connection" fix,
-  -- landed on the module-local side so callers stay unchanged.
-  storage.attach_db(db)
+  return thread.with_worker_db(db_path, lazy_sqlite, function()
+    local old_current = M.current
+    if args and args.cwd and args.detail then
+      M.current = { cwd = args.cwd, detail = args.detail }
+    end
+    local num = args and args.number or (M.current and M.current.detail and M.current.detail.number)
+    local resolved = adapter.resolve(args.cwd)
+    if not resolved then
+      M.current = old_current
+      return { ok = false, err = "no git remote detected" }
+    end
+    local ctx = adapter.ctx(resolved, num)
+    local ok, err = resolved.adapter.update_mr(resolved.cfg, ctx, num, args.title, args.body)
 
-  local old_current = M.current
-  if args and args.cwd and args.detail then
-    M.current = { cwd = args.cwd, detail = args.detail }
-  end
-  local num = args and args.number or (M.current and M.current.detail and M.current.detail.number)
-  local resolved = adapter.resolve(args.cwd)
-  if not resolved then
     M.current = old_current
-    db:close()
-    return { ok = false, err = "no git remote detected" }
-  end
-  local ctx = adapter.ctx(resolved, num)
-  local ok, err = resolved.adapter.update_mr(resolved.cfg, ctx, num, args.title, args.body)
-
-  M.current = old_current
-  db:close()
-  -- Echo the edited fields: the completion closure is shared across all calls,
-  -- so reading captured upvalues would write a PREVIOUS edit into the cache.
-  return { ok = ok, err = err, number = num, title = args.title, body = args.body }
+    -- Echo the edited fields: the completion closure is shared across all calls,
+    -- so reading captured upvalues would write a PREVIOUS edit into the cache.
+    return { ok = ok, err = err, number = num, title = args.title, body = args.body }
+  end)
 end
-
-local update_worker = nil
 
 --- Update an MR/PR's title and description without blocking the UI.
 ---@param title string
@@ -1812,8 +1161,13 @@ function M.update_review_async(title, body, number, cwd, callback)
   end
   cwd = cwd or (M.current and M.current.cwd) or vim.fn.getcwd()
 
-  if not update_worker then
-    update_worker = thread.create_worker("lreview.review", "update_review_thread", function(res)
+  return thread.run_task(
+    "review.update",
+    "lreview.review",
+    "update_review_thread",
+    { cwd = cwd, detail = M.current and M.current.detail, number = num, title = title, body = body },
+    callback,
+    function(res, slot_cb)
       if res and res.ok and res.title ~= nil and M.current
           and M.current.detail and M.current.detail.number == res.number then
         -- `description` is the model's field name (mappers write it); the old
@@ -1833,13 +1187,9 @@ function M.update_review_async(title, body, number, cwd, callback)
           end
         end
       end
-      thread.dispatch_cb("review.update", res and res.ok, res and res.err or nil)
-    end)
-  end
-
-  thread.arm("review.update", callback)
-  update_worker:queue({ cwd = cwd, detail = M.current and M.current.detail, number = num, title = title, body = body })
-  return false, nil
+      if slot_cb then slot_cb(res and res.ok, res and res.err or nil) end
+    end
+  )
 end
 
 return M
