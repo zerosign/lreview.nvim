@@ -244,7 +244,7 @@ function M.add_comment(c)
   local payload = {
     author = c.author,
     body = c.body,
-    created_at = c.created_at,
+    created_at = c.created_at or os.date("!%Y-%m-%dT%H:%M:%SZ"),
     in_reply_to = c.in_reply_to,
     -- synced_body: the remote body at last successful sync.
     -- This is our base for detecting whether the remote changed
@@ -262,14 +262,29 @@ function M.add_comment(c)
   ]], c.c_id, c.t_id, c.remote_id, state_val, mpack.encode(payload))
 end
 
---- Get comments for a thread (excludes pending deletes).
+--- Get comments for a thread (excludes pending deletes), ordered chronologically by created_at.
 ---@param t_id string
 ---@return table[]
 function M.comments_for_thread(t_id)
-  local rows = storage.query("SELECT * FROM comments WHERE t_id = ? AND state != ? ORDER BY rowid", t_id, STATE.DELETED)
+  local rows = storage.query("SELECT rowid, * FROM comments WHERE t_id = ? AND state != ? ORDER BY rowid", t_id, STATE.DELETED)
   for i, r in ipairs(rows) do
     rows[i] = decode_comment(r)
   end
+  table.sort(rows, function(a, b)
+    local ca = a.created_at or ""
+    local cb = b.created_at or ""
+    if ca ~= "" and cb ~= "" then
+      if ca ~= cb then return ca < cb end
+    elseif ca ~= "" then
+      return true
+    elseif cb ~= "" then
+      return false
+    end
+    local ra = a.rowid or 0
+    local rb = b.rowid or 0
+    if ra ~= rb then return ra < rb end
+    return (a.c_id or "") < (b.c_id or "")
+  end)
   return rows
 end
 

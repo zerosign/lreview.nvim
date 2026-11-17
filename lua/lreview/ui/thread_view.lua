@@ -5,6 +5,54 @@ local decor = require("lreview.ui.decor")
 
 local M = {}
 
+local ns = vim.api.nvim_create_namespace("lreview_thread_view")
+
+local function setup_highlights()
+  local defs = {
+    LReviewThreadHeader = { link = "Title" },
+    LReviewThreadDivider = { link = "Comment" },
+    LReviewThreadLocal = { link = "DiagnosticWarn" },
+    LReviewThreadRemote = { link = "DiagnosticOk" },
+    LReviewThreadConflict = { link = "DiagnosticError" },
+    LReviewThreadAuthor = { link = "Identifier" },
+    LReviewThreadTime = { link = "Comment" },
+  }
+  for name, opts in pairs(defs) do
+    if vim.fn.hlexists(name) == 0 then
+      vim.api.nvim_set_hl(0, name, opts)
+    end
+  end
+end
+
+-- Format an ISO 8601 timestamp string into a clean "YYYY-MM-DD HH:MM:SS" display.
+local function format_time(ts)
+  if not ts or ts == "" then return "" end
+  local date, time = ts:match("^(%d%d%d%d%-%d%d%-%d%d)T(%d%d:%d%d:%d%d)")
+  if date and time then
+    return date .. " " .. time
+  end
+  return ts
+end
+
+-- Resolve status badge and highlight group for a comment.
+local function comment_status_badge(c, is_first)
+  if c.state == comments.STATE.CONFLICT then
+    return "[⚠ CONFLICT (Remote Changed)]", "LReviewThreadConflict"
+  elseif c.state == comments.STATE.MODIFIED then
+    return "[✎ Local Edit (Unsynced)]", "LReviewThreadLocal"
+  elseif c.state == comments.STATE.DELETED then
+    return "[✖ Local Delete (Unsynced)]", "LReviewThreadLocal"
+  elseif c.state == comments.STATE.DRAFT or (not c.remote_id or c.remote_id == "") then
+    if is_first then
+      return "[● Local Draft (Unsynced)]", "LReviewThreadLocal"
+    else
+      return "[● Local Reply (Unsynced)]", "LReviewThreadLocal"
+    end
+  else
+    return "[✔ Remote (Synced)]", "LReviewThreadRemote"
+  end
+end
+
 -- Store active view state: { bufnr, winid, line_map, thread_line_map, mo_id, path, line }
 M.state = nil
 -- Active stacked reply float: { bufnr, winid, t_id, thread_winid }
@@ -32,12 +80,13 @@ end
 ---@param mo_id integer
 ---@param rel_path string
 ---@param line integer
----@return string[] lines, table line_map, table thread_line_map
+---@return string[] lines, table line_map, table thread_line_map, table highlights
 local function format_threads_for_line(mo_id, rel_path, line)
   local threads = comments.threads_for_buffer(mo_id, rel_path, line)
   local lines = {}
   local line_map = {}
   local thread_line_map = {}
+  local highlights = {}
 
   local function add_line(text, c_id, t_id)
     lines[#lines + 1] = text
@@ -53,35 +102,76 @@ local function format_threads_for_line(mo_id, rel_path, line)
     if idx > 1 then
       add_line("")
       add_line("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+      highlights[#highlights + 1] = { line = #lines - 1, hl_group = "LReviewThreadDivider", col_start = 0, col_end = -1 }
       add_line("")
     end
 
     local ts = comments.comments_for_thread(t.t_id)
+
+    -- Count unsynced items in this thread
+    local unsynced_count = 0
+    for _, c in ipairs(ts) do
+      if c.state ~= comments.STATE.SYNCED or (not c.remote_id or c.remote_id == "") then
+        unsynced_count = unsynced_count + 1
+      end
+    end
+
     local resolved_tag = comments.thread_is_resolved(t.state) and " [✔ RESOLVED]" or " [● ACTIVE]"
-    
-    add_line(string.format("💬 THREAD #%d%s", idx, resolved_tag), nil, t.t_id)
+    local sync_tag = (unsynced_count > 0)
+      and string.format(" [● %d Unsynced]", unsynced_count)
+      or " [✔ Synced]"
+
+    add_line(string.format("💬 THREAD #%d%s%s", idx, resolved_tag, sync_tag), nil, t.t_id)
+    highlights[#highlights + 1] = { line = #lines - 1, hl_group = "LReviewThreadHeader", col_start = 0, col_end = -1 }
+
     add_line("===========================================================", nil, t.t_id)
+    highlights[#highlights + 1] = { line = #lines - 1, hl_group = "LReviewThreadDivider", col_start = 0, col_end = -1 }
     add_line("", nil, t.t_id)
 
     for i, c in ipairs(ts) do
-      local is_draft = not c.remote_id or c.remote_id == ""
       local author = c.author or "me"
-      local status = is_draft and " (Draft)" or ""
-      local time_str = c.created_at or ""
+      local time_str = format_time(c.created_at)
+      local badge, badge_hl = comment_status_badge(c, i == 1)
 
-      -- Format header:  author • time • status
-      local header = " " .. author .. "  •  " .. time_str .. "  " .. status
+      -- Format header:  author  •  time  •  badge
+      local icon_part = " "
+      local author_part = author
+      local time_part = (time_str ~= "") and ("  •  " .. time_str) or ""
+      local badge_part = "  •  " .. badge
+
+      local header = icon_part .. author_part .. time_part .. badge_part
       add_line(header, c.c_id, t.t_id)
-      add_line(string.rep("─", vim.fn.strdisplaywidth(header)), c.c_id, t.t_id)
+      local cur_line_idx = #lines - 1
+
+      local c_start = #icon_part
+      local c_end = c_start + #author_part
+      highlights[#highlights + 1] = { line = cur_line_idx, hl_group = "LReviewThreadAuthor", col_start = c_start, col_end = c_end }
+
+      if time_str ~= "" then
+        local t_start = c_end + 5
+        local t_end = t_start + #time_str
+        highlights[#highlights + 1] = { line = cur_line_idx, hl_group = "LReviewThreadTime", col_start = t_start, col_end = t_end }
+      end
+
+      local b_start = #header - #badge
+      local b_end = #header
+      highlights[#highlights + 1] = { line = cur_line_idx, hl_group = badge_hl, col_start = b_start, col_end = b_end }
+
+      local underline = string.rep("─", vim.fn.strdisplaywidth(header))
+      add_line(underline, c.c_id, t.t_id)
+      highlights[#highlights + 1] = { line = #lines - 1, hl_group = "LReviewThreadDivider", col_start = 0, col_end = -1 }
 
       -- Format body (split by lines)
-      local body = c.body
+      local body = c.body or ""
       for part in body:gmatch("[^\r\n]+") do
         add_line(part, c.c_id, t.t_id)
       end
 
-      -- Spacer between comments in the same thread
+      -- Clear divider line between comments in the same thread
       if i < #ts then
+        add_line("", nil, t.t_id)
+        add_line("  ─────────────────────────────────────────────────────────", nil, t.t_id)
+        highlights[#highlights + 1] = { line = #lines - 1, hl_group = "LReviewThreadDivider", col_start = 0, col_end = -1 }
         add_line("", nil, t.t_id)
       end
     end
@@ -90,14 +180,11 @@ local function format_threads_for_line(mo_id, rel_path, line)
   -- Help footer
   add_line("")
   add_line("───────────────────────────────────────────────────────────")
-  add_line(" [r] Reply  |  [e] Edit Draft  |  [d] Delete Draft  |  [q] Close")
-  add_line(" [s] Toggle Thread Resolve State  |  [P] Submit Review")
+  highlights[#highlights + 1] = { line = #lines - 1, hl_group = "Comment", col_start = 0, col_end = -1 }
+  add_line(" [r] Reply  |  [e] Edit  |  [d] Delete  |  [s] Resolve  |  [P] Submit  |  [q] Close")
+  highlights[#highlights + 1] = { line = #lines - 1, hl_group = "Comment", col_start = 0, col_end = -1 }
 
-  lines[#lines + 1] = ""
-  lines[#lines + 1] = "───────────────────────────────────────────────────────────"
-  lines[#lines + 1] = " [r] Reply | [e] Edit | [d] Delete | [s] Resolve | [P] Push | [q] Close"
-
-  return lines, line_map, thread_line_map
+  return lines, line_map, thread_line_map, highlights
 end
 
 --- Generate a local uuid (v4-ish) for draft comment ids.
@@ -332,7 +419,7 @@ function M.redraw()
   if not M.state or not vim.api.nvim_buf_is_valid(M.state.bufnr) then
     return
   end
-  local lines, line_map, thread_line_map = format_threads_for_line(M.state.mo_id, M.state.path, M.state.line)
+  local lines, line_map, thread_line_map, highlights = format_threads_for_line(M.state.mo_id, M.state.path, M.state.line)
   M.state.line_map = line_map
   M.state.thread_line_map = thread_line_map
 
@@ -340,6 +427,12 @@ function M.redraw()
   vim.bo[M.state.bufnr].modifiable = true
   vim.api.nvim_buf_set_lines(M.state.bufnr, 0, -1, false, lines)
   vim.bo[M.state.bufnr].modifiable = false
+
+  setup_highlights()
+  vim.api.nvim_buf_clear_namespace(M.state.bufnr, ns, 0, -1)
+  for _, hl in ipairs(highlights or {}) do
+    pcall(vim.api.nvim_buf_add_highlight, M.state.bufnr, ns, hl.hl_group, hl.line, hl.col_start, hl.col_end)
+  end
 end
 
 --- Resolve key actions (reply, edit, delete) in the current thread view.

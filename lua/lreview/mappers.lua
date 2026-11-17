@@ -235,7 +235,7 @@ function M.glab_discussions_to_threads(discussions, mo_id)
           remote_id = tostring(n.id),
           author = n.author and n.author.username,
           body = n.body,
-          created_at = nil,
+          created_at = n.created_at,
           in_reply_to = disc.id,
         }
       end

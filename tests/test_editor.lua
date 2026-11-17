@@ -296,6 +296,85 @@ end
 -- Close scratchpad
 pcall(vim.api.nvim_win_close, scratch_win, true)
 
+-- ============================================================================
+-- 5. Test Thread View: created_at order, separators, and unsynced indicators
+-- ============================================================================
+local thread_view = require("lreview.ui.thread_view")
+review.current = {
+  detail = {
+    mo_id = "github:owner/repo:100",
+    number = 100,
+  },
+  cwd = vim.fn.getcwd(),
+}
+
+-- Create a thread with an older remote comment and a newer local draft reply
+local tv_tid = "thread_view_test_t1"
+comments.create_thread({
+  t_id = tv_tid,
+  mo_id = "github:owner/repo:100",
+  path = "lua/lreview/test.lua",
+  line_start = 10,
+  line_end = 10,
+  state = comments.THREAD_STATE.ACTIVE,
+})
+
+comments.add_comment({
+  c_id = "c_remote_1",
+  t_id = tv_tid,
+  remote_id = "remote_101",
+  author = "reviewer",
+  body = "First remote comment body",
+  created_at = "2026-11-17T08:00:00Z",
+  state = comments.STATE.SYNCED,
+})
+
+comments.add_comment({
+  c_id = "c_local_reply",
+  t_id = tv_tid,
+  remote_id = nil,
+  author = "zerosign",
+  body = "Second local reply body",
+  created_at = "2026-11-17T09:00:00Z",
+  state = comments.STATE.DRAFT,
+})
+
+thread_view.show(test_buf, "lua/lreview/test.lua", 10)
+if not thread_view.state or not vim.api.nvim_buf_is_valid(thread_view.state.bufnr) then
+  print("FAIL: thread_view.show failed to open buffer")
+  os.exit(1)
+end
+
+local tv_lines = vim.api.nvim_buf_get_lines(thread_view.state.bufnr, 0, -1, false)
+local tv_text = table.concat(tv_lines, "\n")
+
+-- Verify remote synced badge and local unsynced badge
+if not tv_text:find("%[✔ Remote %(Synced%)%]") then
+  print("FAIL: thread_view should display [✔ Remote (Synced)] for synced comment")
+  os.exit(1)
+end
+
+if not tv_text:find("%[● Local Reply %(Unsynced%)%]") then
+  print("FAIL: thread_view should display [● Local Reply (Unsynced)] for local reply")
+  os.exit(1)
+end
+
+-- Verify separator line between comments
+if not tv_text:find("─────────────────────────────────────────────────────────") then
+  print("FAIL: thread_view should contain comment divider line")
+  os.exit(1)
+end
+
+-- Verify ordering: remote comment (08:00:00) must appear before local reply (09:00:00)
+local pos_first = tv_text:find("First remote comment body")
+local pos_second = tv_text:find("Second local reply body")
+if not pos_first or not pos_second or pos_first >= pos_second then
+  print("FAIL: thread_view comments must be ordered chronologically by created_at")
+  os.exit(1)
+end
+
+thread_view.close()
+
 print("SUCCESS: Comment Scratchpad, Discard Keymaps, and Autocomplete Tests verified.")
 
 -- Teardown

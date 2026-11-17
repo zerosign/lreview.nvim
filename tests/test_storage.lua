@@ -133,6 +133,12 @@ if not updated_comment or updated_comment.body ~= updated_body then
   os.exit(1)
 end
 
+-- Ensure chronological ordering by created_at is preserved after update:
+if updated_rows[1].c_id ~= comment1.c_id or updated_rows[2].c_id ~= comment2.c_id then
+  print("FAIL: Comments should remain ordered chronologically by created_at after update")
+  os.exit(1)
+end
+
 -- Test draft list queries
 local draft_threads = comments.draft_threads(mock_pr.mo_id)
 if #draft_threads ~= 1 then
