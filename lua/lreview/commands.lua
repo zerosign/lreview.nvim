@@ -196,8 +196,37 @@ local function cmd_approve(args)
         vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
         return
       end
-      vim.notify("lreview: approved MR #" .. (number or (review.current and review.current.detail.number)), vim.log.levels.INFO)
+      local num_str = number or (review.current and review.current.detail and review.current.detail.number) or ""
+      local url = review.get_mr_url()
+      if url and url ~= "" then
+        vim.notify(string.format("lreview: approved MR #%s\nLink: %s (use :LocalReviewWeb to open in browser)", tostring(num_str), url), vim.log.levels.INFO)
+      else
+        vim.notify("lreview: approved MR #" .. tostring(num_str), vim.log.levels.INFO)
+      end
     end)
+  end)
+end
+
+local function cmd_web(args)
+  M.ensure_review_started(function(ok)
+    if not ok then return end
+    local number = args.args ~= "" and tonumber(args.args) or nil
+    local detail
+    if number and review.current and review.current.detail and review.current.detail.number ~= number then
+      detail = {
+        provider = review.current.detail.provider,
+        repo = review.current.detail.repo,
+        number = number,
+      }
+    else
+      detail = review.current and review.current.detail
+    end
+    local ok_open, res = review.open_browser(detail)
+    if not ok_open then
+      vim.notify("lreview: " .. tostring(res), vim.log.levels.WARN)
+    else
+      vim.notify("lreview: opened " .. tostring(res) .. " in browser", vim.log.levels.INFO)
+    end
   end)
 end
 
@@ -365,6 +394,8 @@ function M.register()
   api.nvim_create_user_command("LocalReviewPullRequest", cmd_pull_requests, {})
   api.nvim_create_user_command("LocalReviewClose", cmd_close, { nargs = "?" })
   api.nvim_create_user_command("LocalReviewApprove", cmd_approve, { nargs = "?" })
+  api.nvim_create_user_command("LocalReviewWeb", cmd_web, { nargs = "?" })
+  api.nvim_create_user_command("LocalReviewBrowse", cmd_web, { nargs = "?" })
   api.nvim_create_user_command("LocalReviewRequestReview", cmd_request_review, { nargs = "?" })
   api.nvim_create_user_command("LocalReviewToggle", cmd_toggle, {})
   api.nvim_create_user_command("LocalReviewHover", cmd_open, {})

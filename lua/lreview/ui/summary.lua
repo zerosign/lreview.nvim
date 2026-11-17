@@ -62,6 +62,10 @@ function M.redraw()
       lines[#lines + 1] = string.format("Filter: %s | Sort: [%s] (f: filter, g: toggle view, S: cycle sort)",
         M.state.show_all and "[Showing All]" or "[Active & Drafts Only]", M.state.sort_mode)
     end
+    local mr_url = review.get_mr_url()
+    if mr_url then
+      lines[#lines + 1] = "Link: " .. mr_url
+    end
     lines[#lines + 1] = ""
     lines[#lines + 1] = string.format(" %-12s %-8s %-8s %s", "Status", "+Adds", "-Dels", "Path")
     lines[#lines + 1] = string.rep("─", win_w)
@@ -113,10 +117,14 @@ function M.redraw()
 
     lines[#lines + 1] = ""
     lines[#lines + 1] = string.rep("─", win_w)
-    lines[#lines + 1] = " [o/<CR>] Open File | [A] Approve | [R] Reject | [g] Switch to Threads View | [q] Close"
+    lines[#lines + 1] = " [o/<CR>] Open File | [A] Approve | [R] Reject | [w] Browser | [g] Switch to Threads View | [q] Close"
   else
     lines[#lines + 1] = "=== Local Review Summary [Threads] ==="
     lines[#lines + 1] = "Filter: " .. (M.state.show_all and "[Showing All]" or "[Active & Drafts Only]") .. " (f: filter, g: toggle view, u: pull)"
+    local mr_url = review.get_mr_url()
+    if mr_url then
+      lines[#lines + 1] = "Link: " .. mr_url
+    end
     lines[#lines + 1] = ""
     lines[#lines + 1] = string.format(" %-12s %-12s %-25s %s", "Status", "Author", "Location", "Preview")
     lines[#lines + 1] = string.rep("─", 80)
@@ -149,7 +157,7 @@ function M.redraw()
 
     lines[#lines + 1] = ""
     lines[#lines + 1] = string.rep("─", 80)
-    lines[#lines + 1] = " [o/<CR>] Open Thread | [s/r] Resolve | [A] Approve | [R] Reject | [g] Switch to Files View | [q] Close"
+    lines[#lines + 1] = " [o/<CR>] Open Thread | [s/r] Resolve | [A] Approve | [R] Reject | [w] Browser | [g] Switch to Files View | [q] Close"
   end
 
   M.state.threads_map = threads_map
@@ -278,7 +286,7 @@ local function handle_action(action)
 
   local thread = M.state.threads_map[cursor_line]
 
-  if not thread and action ~= "push_all" and action ~= "pull" and action ~= "approve" and action ~= "reject" then
+  if not thread and action ~= "push_all" and action ~= "pull" and action ~= "approve" and action ~= "reject" and action ~= "browse" then
     vim.notify("lreview: move cursor onto a discussion or file row to perform action", vim.log.levels.WARN)
     return
   end
@@ -347,11 +355,23 @@ local function handle_action(action)
       if not ok then
         vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
       else
-        vim.notify("lreview: MR approved successfully", vim.log.levels.INFO)
+        local url = review.get_mr_url()
+        if url and url ~= "" then
+          vim.notify("lreview: MR approved successfully\nLink: " .. url .. " (press [w] to open in browser)", vim.log.levels.INFO)
+        else
+          vim.notify("lreview: MR approved successfully", vim.log.levels.INFO)
+        end
         local sync2 = require("lreview.sync")
         sync2.schedule()
       end
     end)
+  elseif action == "browse" then
+    local ok, res = review.open_browser()
+    if not ok then
+      vim.notify("lreview: " .. tostring(res), vim.log.levels.WARN)
+    else
+      vim.notify("lreview: opened " .. tostring(res) .. " in browser", vim.log.levels.INFO)
+    end
   elseif action == "reject" then
     local adapter = require("lreview.adapter")
     local resolved = adapter.resolve(review.current and review.current.cwd)
@@ -422,6 +442,8 @@ function M.open()
   vim.keymap.set("n", "S", function() M.cycle_sort_mode() end, opts)
   vim.keymap.set("n", "A", function() handle_action("approve") end, opts)
   vim.keymap.set("n", "R", function() handle_action("reject") end, opts)
+  vim.keymap.set("n", "w", function() handle_action("browse") end, opts)
+  vim.keymap.set("n", "W", function() handle_action("browse") end, opts)
   vim.keymap.set("n", "C", function() M.close() vim.cmd("LocalReviewCreate") end, opts)
 
   local ui_cfg = config.get_defaults().ui or {}

@@ -205,6 +205,35 @@ git.default_branch = function()
   return "master"
 end
 
+-- ============================================================================
+-- 6. Test Web URL & Browser Opening
+-- ============================================================================
+local gh_url = review.get_mr_url({ provider = "github", repo = "owner/repo", number = 100 })
+assert(gh_url == "https://github.com/owner/repo/pull/100", "GitHub MR url mismatch: " .. tostring(gh_url))
+
+local gl_url = review.get_mr_url({ provider = "gitlab", repo = "group/project", number = 42 })
+assert(gl_url == "https://gitlab.com/group/project/-/merge_requests/42", "GitLab MR url mismatch: " .. tostring(gl_url))
+
+local custom_url = review.get_mr_url({ url = "https://custom.git.corp/repo/-/merge_requests/99" })
+assert(custom_url == "https://custom.git.corp/repo/-/merge_requests/99", "Custom MR url mismatch: " .. tostring(custom_url))
+
+-- Test opening browser and register copying
+local orig_open = vim.ui.open
+local last_opened_url = nil
+vim.ui.open = function(url)
+  last_opened_url = url
+  return true
+end
+
+local ok_b, res_url = review.open_browser({ provider = "github", repo = "owner/repo", number = 100 })
+assert(ok_b == true, "open_browser should succeed")
+assert(res_url == "https://github.com/owner/repo/pull/100", "open_browser return mismatch")
+assert(last_opened_url == "https://github.com/owner/repo/pull/100", "vim.ui.open called with correct url")
+assert(vim.fn.getreg("+") == "https://github.com/owner/repo/pull/100", "clipboard + register contains url")
+
+vim.ui.open = orig_open
+print("SUCCESS: Web URL resolution and browser launch verified.")
+
 adapter.resolve = function(cwd)
   return {
     adapter = {

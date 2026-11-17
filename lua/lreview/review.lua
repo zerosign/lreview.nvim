@@ -1201,4 +1201,68 @@ function M.update_review_async(title, body, number, cwd, callback)
   )
 end
 
+--- Get the web URL for the active review or a specific PR/MR.
+--- Works uniformly across GitHub, GitLab, and custom forges.
+---@param mr_or_detail table|nil
+---@return string|nil
+function M.get_mr_url(mr_or_detail)
+  local d = mr_or_detail or (M.current and M.current.detail)
+  if not d then return nil end
+  if d.url and d.url ~= "" then
+    return d.url
+  end
+
+  -- Check SQLite pull_request cache for url
+  if d.mo_id then
+    local pr = require("lreview.storage.pull_request").get(d.mo_id)
+    if pr and pr.url and pr.url ~= "" then
+      return pr.url
+    end
+  end
+
+  -- Fallback construction based on adapter domain and number
+  local resolved = adapter.resolve(M.current and M.current.cwd or vim.fn.getcwd())
+  local host = resolved and resolved.cfg and resolved.cfg.domain
+  local provider = d.provider or (resolved and resolved.provider)
+  local repo = d.repo or (resolved and resolved.repo)
+  local number = d.number
+  if not repo or not number then return nil end
+
+  if provider == "gitlab" or (resolved and resolved.adapter and resolved.adapter.name == "gitlab") then
+    host = host or "gitlab.com"
+    return string.format("https://%s/%s/-/merge_requests/%s", host, repo, tostring(number))
+  else
+    host = host or "github.com"
+    return string.format("https://%s/%s/pull/%s", host, repo, tostring(number))
+  end
+end
+
+--- Open the PR/MR in the default web browser.
+--- Copies the URL to the clipboard ("+" and "*" registers) as well.
+---@param mr_or_detail table|nil
+---@return boolean ok, string url_or_err
+function M.open_browser(mr_or_detail)
+  local url = M.get_mr_url(mr_or_detail)
+  if not url or url == "" then
+    return false, "no MR/PR web URL available"
+  end
+
+  -- Copy to system clipboard for easy sharing/pasting
+  pcall(vim.fn.setreg, "+", url)
+  pcall(vim.fn.setreg, "*", url)
+
+  if vim.ui and vim.ui.open then
+    local ok = pcall(vim.ui.open, url)
+    if ok then return true, url end
+  end
+
+  local opener = vim.fn.has("mac") == 1 and "open" or (vim.fn.has("win32") == 1 and "explorer" or "xdg-open")
+  if vim.fn.executable(opener) == 1 then
+    vim.fn.jobstart({ opener, url }, { detach = true })
+    return true, url
+  end
+
+  return false, "could not launch browser; link copied to clipboard: " .. url
+end
+
 return M
