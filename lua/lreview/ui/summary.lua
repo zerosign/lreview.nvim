@@ -355,8 +355,8 @@ local function handle_action(action)
   elseif action == "reject" then
     local adapter = require("lreview.adapter")
     local resolved = adapter.resolve(review.current and review.current.cwd)
-    if not adapter.supports(resolved, "review_verdict") then
-      vim.notify("lreview: review verdict capability is not supported by active adapter", vim.log.levels.WARN)
+    if not adapter.supports(resolved, "request_changes") then
+      vim.notify("lreview: request changes is not supported by " .. (resolved and resolved.adapter and resolved.adapter.name or "active adapter"), vim.log.levels.WARN)
       return
     end
     vim.notify("lreview: submitting request changes verdict...", vim.log.levels.INFO)

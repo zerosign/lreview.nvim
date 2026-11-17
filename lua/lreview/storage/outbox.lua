@@ -104,14 +104,11 @@ local function enqueue_one(op)
   ]], op.c_id, op.op, M.STATUS.DONE)
   local row = existing[1]
   if row then
-    if row.payload == snap then
-      return row.op_id, false
-    end
     storage.execute([[
       UPDATE push_ops SET payload = ?, status = ?, error = NULL, updated_at = ?
       WHERE op_id = ?
     ]], snap, M.STATUS.QUEUED, now(), row.op_id)
-    return row.op_id, true
+    return row.op_id, row.payload ~= snap
   end
 
   local op_id = op.op_id or uuid()
@@ -307,6 +304,23 @@ function M.prune_done(mo_id)
     storage.execute("DELETE FROM push_ops WHERE mo_id = ? AND status = ?", mo_id, M.STATUS.DONE)
   end
   return #rows
+end
+
+--- Purge any open or failed verdict ops for an MR.
+--- Verdicts are ephemeral to a review submission session; an old failed or
+--- pending verdict must never block or poison subsequent submissions.
+---@param mo_id string
+function M.purge_verdict(mo_id)
+  storage.execute([[
+    DELETE FROM push_ops
+    WHERE mo_id = ? AND op = ? AND status != ?
+  ]], mo_id, M.OP.VERDICT, M.STATUS.DONE)
+end
+
+--- Delete an op from the outbox by op_id.
+---@param op_id string
+function M.delete_op(op_id)
+  storage.execute("DELETE FROM push_ops WHERE op_id = ?", op_id)
 end
 
 return M

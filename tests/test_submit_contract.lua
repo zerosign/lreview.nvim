@@ -294,6 +294,16 @@ local failed_op = storage.query(
 check(failed_op and failed_op.error:match("request.-changes") ~= nil,
   "failed verdict op carries the reason")
 
+-- Verify that subsequent submit with COMMENT purges the failed verdict so it does not get stuck
+seed_thread("gl_sub_t", GL_MO, "src/x.lua", 12, true)
+seed_comment("gl_sub_c", "gl_sub_t", "next note", comments.STATE.DRAFT)
+arm_intercept()
+pushed, err, remaining = review._submit_pushes(GL, gl_resolved, ctx_for(gl_resolved, 8), nil, "COMMENT")
+check(pushed == 1, "next note submitted successfully")
+check(err == nil, "failed verdict was purged and did not block or poison subsequent submit")
+check(remaining == 0, "no remaining drafts after comment pushed")
+check(outbox.count_failed(GL_MO) == 0, "failed verdict purged from outbox on COMMENT submit")
+
 -- ===========================================================================
 -- 5. Crash recovery + reconcile adoption
 -- ===========================================================================

@@ -17,6 +17,7 @@ M.provider = "gh"
 
 M.capabilities = {
   review_verdict   = true,
+  request_changes  = true,
   draft_mr         = true,
   update_mr        = true,
   close_mr         = true,

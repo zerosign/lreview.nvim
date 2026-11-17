@@ -76,6 +76,12 @@ end
 ---@param verdict string|nil
 ---@return table[] ops, string[] skipped
 function M.build_ops(detail, resolved, thread_id, verdict)
+  -- Purge any previous non-DONE verdict op if this submit does not request one,
+  -- so obsolete failed/pending verdicts don't linger in the outbox.
+  if thread_id or not verdict or verdict == "COMMENT" then
+    outbox.purge_verdict(detail.mo_id)
+  end
+
   local cs = M.compute_change_set(detail.mo_id)
   local ops, skipped = {}, {}
   local function keep(item)
@@ -334,24 +340,33 @@ function M.submit_pushes(detail, resolved, ctx, thread_id, verdict)
   -- Only reached when build_ops decided the verdict could not ride along with a
   -- comment batch. An adapter that claims review_verdict but ships no
   -- submit_verdict is reported as a failure rather than a silent no-op.
-  for _, op in ipairs(group(outbox.OP.VERDICT)) do
-    local ok, err
-    outbox.mark_running(op.op_id)
-    if resolved.adapter.submit_verdict then
-      ok, err = resolved.adapter.submit_verdict(
-        resolved.cfg, ctx, number, op.verdict, op.body)
-    else
-      ok, err = false, "active adapter declares review_verdict but has no submit_verdict"
+  if not thread_id and verdict and verdict ~= "COMMENT" then
+    for _, op in ipairs(group(outbox.OP.VERDICT)) do
+      local ok, err
+      outbox.mark_running(op.op_id)
+      if op.verdict == "REQUEST_CHANGES" and not adapter.supports(resolved, "request_changes") then
+        ok, err = false, string.format("%s: 'request changes' is not supported by adapter", resolved.adapter.name or "active adapter")
+      elseif resolved.adapter.submit_verdict then
+        ok, err = resolved.adapter.submit_verdict(
+          resolved.cfg, ctx, number, op.verdict, op.body)
+      else
+        ok, err = false, "active adapter declares review_verdict but has no submit_verdict"
+      end
+      if not ok then
+        outbox.mark_failed(op.op_id, err)
+        record(err)
+        break
+      end
+      commit(op, nil)
     end
-    if not ok then
-      outbox.mark_failed(op.op_id, err)
-      record(err)
-      break
-    end
-    commit(op, nil)
   end
 
-  local remaining = #take_pending()
+  local remaining = 0
+  for _, op in ipairs(take_pending()) do
+    if op.op ~= outbox.OP.VERDICT then
+      remaining = remaining + 1
+    end
+  end
   if #skipped > 0 then
     record("skipped: " .. table.concat(skipped, "; "))
   end

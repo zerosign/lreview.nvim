@@ -17,6 +17,7 @@ M.provider = "glab"
 
 M.capabilities = {
   review_verdict   = true,
+  request_changes  = false,
   draft_mr         = true,
   update_mr        = true,
   close_mr         = true,

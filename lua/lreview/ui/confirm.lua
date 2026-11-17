@@ -7,6 +7,8 @@ local M = {}
 function M.ask_confirmation(summary_lines, opts, callback)
   opts = opts or {}
   local has_verdict = opts.has_verdict == true
+  local can_request_changes = (opts.can_request_changes == true) or (opts.can_request_changes == nil and has_verdict)
+  local can_approve = (opts.can_approve ~= false) and has_verdict
 
   local lines = {}
   for _, l in ipairs(summary_lines) do
@@ -14,8 +16,12 @@ function M.ask_confirmation(summary_lines, opts, callback)
   end
   lines[#lines + 1] = ""
   lines[#lines + 1] = "Select Submission Verdict:"
-  if has_verdict then
-    lines[#lines + 1] = "  [c] Comment  |  [a] Approve  |  [r] Request Changes  |  [q/<esc>] Cancel"
+  if has_verdict and (can_approve or can_request_changes) then
+    local items = { "[c] Comment" }
+    if can_approve then items[#items + 1] = "[a] Approve" end
+    if can_request_changes then items[#items + 1] = "[r] Request Changes" end
+    items[#items + 1] = "[q/<esc>] Cancel"
+    lines[#lines + 1] = "  " .. table.concat(items, "  |  ")
   else
     lines[#lines + 1] = "  [c/<CR>] Submit Comments  |  [q/<esc>] Cancel"
   end
@@ -54,8 +60,12 @@ function M.ask_confirmation(summary_lines, opts, callback)
   vim.keymap.set("n", "<CR>", function() close("COMMENT") end, key_opts)
 
   if has_verdict then
-    vim.keymap.set("n", "a", function() close("APPROVE") end, key_opts)
-    vim.keymap.set("n", "r", function() close("REQUEST_CHANGES") end, key_opts)
+    if can_approve then
+      vim.keymap.set("n", "a", function() close("APPROVE") end, key_opts)
+    end
+    if can_request_changes then
+      vim.keymap.set("n", "r", function() close("REQUEST_CHANGES") end, key_opts)
+    end
   end
 end
 

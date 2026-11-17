@@ -480,6 +480,8 @@ local function confirm_submit(resolved, thread_id, done)
   table.insert(lines, 1, "Pending Review Changes:")
 
   local has_verdict = adapter.supports(resolved, "review_verdict")
+  local can_request_changes = adapter.supports(resolved, "request_changes")
+  local can_approve = adapter.supports(resolved, "approve_mr")
   local confirm_ui = require("lreview.ui.confirm")
 
   if vim.g.lreview_test_mode then
@@ -487,7 +489,11 @@ local function confirm_submit(resolved, thread_id, done)
     return
   end
 
-  confirm_ui.ask_confirmation(lines, { has_verdict = has_verdict }, function(choice)
+  confirm_ui.ask_confirmation(lines, {
+    has_verdict = has_verdict,
+    can_request_changes = can_request_changes,
+    can_approve = can_approve,
+  }, function(choice)
     if not choice then
       done(nil, true)
     else
@@ -587,9 +593,11 @@ local function ensure_submit_worker()
     local remaining = (res and res.remaining) or 0
     local err = res and res.err
 
-    if success then
-      refresh_review_ui()
-    elseif err then
+    -- Always refresh review UI so open thread views, diff signs, and summary panels
+    -- are updated regardless of whether submit succeeded completely or partially.
+    refresh_review_ui()
+
+    if not success and err then
       -- Never fail silently: surface the push error to the user (item 3).
       vim.notify("lreview: push failed: " .. tostring(err), vim.log.levels.ERROR)
     end
@@ -656,6 +664,7 @@ function M.submit_review(thread_id, callback)
       local count, err, remaining = M._submit_pushes(
         detail, resolved, adapter.ctx(resolved, detail.number), thread_id, verdict)
       M.sync_review()
+      refresh_review_ui()
       sync_pushed, sync_err = count, err
       if callback then callback(err == nil, count or 0, err, remaining) end
       return

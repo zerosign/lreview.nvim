@@ -14,6 +14,7 @@ local M = {}
 --   verdict_in_review_batch -- the review event can ride along with that call
 M.default_capabilities = {
   review_verdict   = false,
+  request_changes  = false,
   draft_mr         = false,
   update_mr        = true,
   close_mr         = true,

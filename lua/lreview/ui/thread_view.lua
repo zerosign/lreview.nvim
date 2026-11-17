@@ -563,15 +563,17 @@ local function handle_action(action)
   elseif action == "submit" then
     vim.notify("lreview: submitting review...", vim.log.levels.INFO)
     review.submit_review(nil, function(ok, count, err)
-      if err then
-        vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
-      else
-        vim.notify(string.format("lreview: successfully submitted %d comment(s)", count), vim.log.levels.INFO)
-        M.redraw()
+      M.redraw()
+      if M.state and M.state.path then
         local bufnr = vim.fn.bufnr(M.state.path)
         if bufnr ~= -1 then
           require("lreview.ui.decor").refresh(bufnr)
         end
+      end
+      if err then
+        vim.notify("lreview: " .. tostring(err), vim.log.levels.ERROR)
+      else
+        vim.notify(string.format("lreview: successfully submitted %d comment(s)", count), vim.log.levels.INFO)
       end
     end)
   end
