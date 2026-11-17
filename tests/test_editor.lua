@@ -373,6 +373,40 @@ if not pos_first or not pos_second or pos_first >= pos_second then
   os.exit(1)
 end
 
+-- ============================================================================
+-- 6. Native :w Write/Save in Thread View Reply
+-- ============================================================================
+thread_view.open_reply_float(tv_tid)
+if not thread_view.reply_state or not vim.api.nvim_buf_is_valid(thread_view.reply_state.bufnr) then
+  print("FAIL: thread_view.open_reply_float failed to create reply buffer")
+  os.exit(1)
+end
+
+local reply_buf = thread_view.reply_state.bufnr
+vim.api.nvim_buf_set_lines(reply_buf, 0, -1, false, { "This reply is saved natively with :w" })
+vim.api.nvim_buf_call(reply_buf, function()
+  vim.cmd("write")
+end)
+
+if thread_view.reply_state ~= nil then
+  print("FAIL: reply window should close after :w save")
+  os.exit(1)
+end
+
+local thread_comments = comments.comments_for_thread(tv_tid)
+local found_native_save = false
+for _, c in ipairs(thread_comments) do
+  if c.body == "This reply is saved natively with :w" then
+    found_native_save = true
+    break
+  end
+end
+
+if not found_native_save then
+  print("FAIL: comment saved with native :w was not found in storage")
+  os.exit(1)
+end
+
 thread_view.close()
 
 print("SUCCESS: Comment Scratchpad, Discard Keymaps, and Autocomplete Tests verified.")

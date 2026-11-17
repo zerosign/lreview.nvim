@@ -58,6 +58,7 @@ local function create_scratchpad(initial_text, save_callback, extra_opts)
     local h = math.floor(vim.o.lines * 0.5)
     local row = math.floor((vim.o.lines - h) / 2)
     local col = math.floor((vim.o.columns - w) / 2)
+    local win_title = (extra_opts and extra_opts.title) or " 💬 Comment (:w to save, :q to cancel) "
     win = vim.api.nvim_open_win(buf, true, {
       relative = "editor",
       row = row,
@@ -65,6 +66,8 @@ local function create_scratchpad(initial_text, save_callback, extra_opts)
       width = w,
       height = h,
       border = "rounded",
+      title = win_title,
+      title_pos = "center",
     })
   end
 
@@ -159,7 +162,7 @@ function M.open_reply(thread_id)
       end
     end
     vim.notify("lreview: reply added", vim.log.levels.INFO)
-  end)
+  end, { title = " ✍️ Reply (:w to save, :q to cancel) " })
 end
 
 --- Open editor to edit an existing draft comment.
@@ -199,7 +202,7 @@ function M.open_edit(c_id, current_body)
       end
     end
     vim.notify("lreview: comment updated", vim.log.levels.INFO)
-  end)
+  end, { title = " ✎ Edit Comment (:w to save, :q to cancel) " })
 end
 
 --- Open editor to create a brand new comment thread from the code buffer.
@@ -263,7 +266,7 @@ function M.open_new_comment(path, start_line, end_line)
       decor.refresh(bufnr)
     end
     vim.notify("lreview: draft comment added", vim.log.levels.INFO)
-  end, { context_lines = context_lines })
+  end, { title = " 💬 New Comment (:w to save, :q to cancel) ", context_lines = context_lines })
 end
 
 --- Create an MR scratchpad editor for multi-line description and title editing.
@@ -301,7 +304,7 @@ function M.open_mr_editor(template_content, save_callback)
 
     local body = table.concat(body_lines, "\n"):gsub("^%s*(.-)%s*$", "%1")
     save_callback(title, body)
-  end)
+  end, { title = " 📝 Create Merge Request (:w to save, :q to cancel) " })
 end
 
 return M

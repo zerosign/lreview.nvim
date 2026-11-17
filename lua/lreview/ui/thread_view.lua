@@ -286,7 +286,7 @@ function M.open_reply_float(t_id)
 
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].filetype = "markdown"
-  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].buftype = "acwrite"  -- Allows native :w, :wq, and ZZ to save
   vim.bo[buf].bufhidden = "wipe"
   vim.api.nvim_buf_set_name(buf, "lreview://reply/" .. t_id)
 
@@ -305,7 +305,7 @@ function M.open_reply_float(t_id)
     height = cur_height,
     style = "minimal",
     border = "rounded",
-    title = " ✍️ Reply ",
+    title = " ✍️ Reply (:w to save, :q to cancel) ",
     title_pos = "center",
   })
 
@@ -339,6 +339,7 @@ function M.open_reply_float(t_id)
       vim.notify("lreview: reply cannot be empty", vim.log.levels.WARN)
       return
     end
+    vim.bo[buf].modified = false
     if submit_immediately then
       -- Push directly through the same path the scratchpad uses. Close the
       -- float first so the sync-bus refresh doesn't fight with it.
@@ -376,12 +377,21 @@ function M.open_reply_float(t_id)
     M.close_reply()
   end
 
+  -- Intercept standard write commands (:w, :wq, ZZ)
+  vim.api.nvim_create_autocmd("BufWriteCmd", {
+    buffer = buf,
+    callback = submit,
+  })
+
   local function cancel()
     M.close_reply()
   end
 
-  vim.keymap.set({ "n", "i" }, "<C-s>", submit, opts)
-  vim.keymap.set({ "n", "i" }, "<C-cr>", submit, opts)
+  -- Keymaps: native :w / :wq work out of the box via BufWriteCmd.
+  -- <C-s>, <C-cr>, and <leader>s delegate to :w for convenient shortcuts.
+  vim.keymap.set({ "n", "i" }, "<C-s>", "<cmd>w<cr>", opts)
+  vim.keymap.set({ "n", "i" }, "<C-cr>", "<cmd>w<cr>", opts)
+  vim.keymap.set("n", "<leader>s", "<cmd>w<cr>", opts)
   vim.keymap.set("n", "q", cancel, opts)
   vim.keymap.set("n", "<esc>", cancel, opts)
   vim.keymap.set({ "n", "i" }, "<C-c>", cancel, opts)
